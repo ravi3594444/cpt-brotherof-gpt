@@ -505,7 +505,7 @@ function ChatWorkspace({
       }),
     [],
   );
-  const { messages, sendMessage, status, stop, error, clearError } =
+  const { messages, sendMessage, regenerate, status, stop, error, clearError } =
     useChat<ScoutMessage>({ id, messages: initialMessages, transport });
   const busy = status === "submitted" || status === "streaming";
   const sentInitial = useRef(false);
@@ -980,10 +980,8 @@ function ChatWorkspace({
                       variant="ghost"
                       className="mt-2"
                       onClick={() => {
-                        const last = messages.findLast(
-                          (m) => m.role === "user",
-                        );
-                        if (last) void submit(messageText(last));
+                        clearError();
+                        void regenerate();
                       }}
                     >
                       Try again
