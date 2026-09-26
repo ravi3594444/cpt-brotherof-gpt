@@ -1,7 +1,7 @@
 "use client";
-import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { nanoid } from "nanoid";
-import { useChat } from "@ai-sdk/react";
+import { Chat, useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import {
   ArrowUp,
@@ -14,7 +14,6 @@ import {
   Copy,
   ExternalLink,
   Globe2,
-  History,
   LoaderCircle,
   MessageSquare,
   Plus,
@@ -26,7 +25,6 @@ import {
   Sparkles,
   Square,
   Trash2,
-  X,
   GitCompareArrows,
 } from "lucide-react";
 import {
@@ -131,6 +129,9 @@ export default function Home() {
     try {
       const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
       if (Array.isArray(raw))
+        // Device-local history loads after hydration: reading localStorage while
+        // rendering would make the first client render differ from the server HTML.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setThreads(
           raw
             .filter(
@@ -469,78 +470,72 @@ function ChatWorkspace({
   onSettings: () => void;
 }) {
   const [webSelected, setWebEnabled] = useState(true);
-  const [preview, setPreview] = useState(true);
+  // Sample mode starts on until a research engine is connected; the switch overrides it.
+  const [previewChoice, setPreview] = useState<boolean | null>(null);
+  const preview = previewChoice ?? !config.searchConnected;
   const [engine, setEngine] = useState<"auto" | "browser_use" | "kernel" | "tavily">("auto");
-  useEffect(() => {
-    if (config.searchConnected) setPreview(false);
-  }, [config.searchConnected]);
   const webAvailable = preview || config.searchConnected;
   const webEnabled = webSelected && webAvailable;
   const [input, setInput] = useState("");
   const [readerOpen, setReaderOpen] = useState(false);
   const [readerSources, setReaderSources] = useState<ResearchSource[]>([]);
   const [copied, setCopied] = useState("");
-  const webRef = useRef(true);
-  const previewRef = useRef(preview);
-  const engineRef = useRef(engine);
-  webRef.current = webEnabled;
-  previewRef.current = preview;
-  engineRef.current = engine;
-  const transport = useMemo(
+  const [chat] = useState(
     () =>
-      new DefaultChatTransport({
-        api: "/api/chat",
-        prepareSendMessagesRequest: ({ messages }) => ({
-          body: {
-            webEnabled: webRef.current,
-            preview: previewRef.current,
-            engine: engineRef.current,
-            messages: messages.slice(-16).map((m) => ({
-              id: m.id,
-              role: m.role,
-              parts: m.parts.filter((p) => p.type === "text"),
-            })),
-          },
+      new Chat<ScoutMessage>({
+        id,
+        messages: initialMessages,
+        transport: new DefaultChatTransport({
+          api: "/api/chat",
+          prepareSendMessagesRequest: ({ messages, body }) => ({
+            body: {
+              ...body,
+              messages: messages.slice(-16).map((m) => ({
+                id: m.id,
+                role: m.role,
+                parts: m.parts.filter((p) => p.type === "text"),
+              })),
+            },
+          }),
         }),
       }),
-    [],
   );
   const { messages, sendMessage, regenerate, status, stop, error, clearError } =
-    useChat<ScoutMessage>({ id, messages: initialMessages, transport });
+    useChat<ScoutMessage>({ chat });
   const busy = status === "submitted" || status === "streaming";
+  const requestBody = { webEnabled, preview, engine };
   const sentInitial = useRef(false);
-  const messagesRef = useRef(messages);
-  messagesRef.current = messages;
-  const busyRef = useRef(busy);
-  busyRef.current = busy;
-  useEffect(() => {
-    if (initialPrompt && !sentInitial.current) {
-      sentInitial.current = true;
-      void sendMessage({ text: initialPrompt });
-    }
-  }, [initialPrompt, sendMessage]);
   useEffect(() => {
     if (messages.length && (status === "ready" || status === "error"))
       onSave(id, messages);
   }, [messages, status, id, onSave]);
   useEffect(
     () => () => {
-      void stop();
-      const current = messagesRef.current;
-      if (current.length && busyRef.current) onSave(id, current);
+      const wasBusy = chat.status === "submitted" || chat.status === "streaming";
+      void chat.stop();
+      if (chat.messages.length && wasBusy) onSave(id, chat.messages);
     },
-    [id, onSave, stop],
+    [chat, id, onSave],
   );
   const submit = useCallback(
-    (text: string) => {
+    (text: string, options?: { webEnabled?: boolean }) => {
       const clean = text.trim();
-      if (!clean || busyRef.current) return;
+      if (!clean || chat.status === "submitted" || chat.status === "streaming") return;
       clearError();
       setInput("");
-      return sendMessage({ text: clean });
+      return sendMessage(
+        { text: clean },
+        { body: { webEnabled, preview, engine, ...options } },
+      );
     },
-    [sendMessage, clearError],
+    [chat, sendMessage, clearError, webEnabled, preview, engine],
   );
+  useEffect(() => {
+    if (initialPrompt && !sentInitial.current) {
+      sentInitial.current = true;
+      void submit(initialPrompt);
+    }
+  }, [initialPrompt, submit]);
   useEffect(() => {
     type ToolContext = {
       registerTool: (
@@ -580,14 +575,13 @@ function ChatWorkspace({
               throw new Error(
                 "A question between 1 and 6000 characters is required.",
               );
-            if (busyRef.current)
+            if (chat.status === "submitted" || chat.status === "streaming")
               throw new Error("A research task is already running.");
             if (!webAvailable)
               throw new Error("Web research is not connected yet.");
             setWebEnabled(true);
-            webRef.current = true;
-            await submit(input.question);
-            const answer = messagesRef.current.findLast(
+            await submit(input.question, { webEnabled: true });
+            const answer = chat.messages.findLast(
               (m) => m.role === "assistant",
             );
             return {
@@ -601,7 +595,7 @@ function ChatWorkspace({
       ),
     ).catch(() => {});
     return () => controller.abort();
-  }, [submit, config.demo, preview, webAvailable]);
+  }, [chat, submit, config.demo, preview, webAvailable]);
   const openSources = (sources: ResearchSource[]) => {
     setReaderSources(sources);
     setReaderOpen(true);
@@ -981,7 +975,7 @@ function ChatWorkspace({
                       className="mt-2"
                       onClick={() => {
                         clearError();
-                        void regenerate();
+                        void regenerate({ body: requestBody });
                       }}
                     >
                       Try again
