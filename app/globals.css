@@ -303,8 +303,11 @@ textarea:focus-visible {
   flex: 1;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  /* .welcome centers itself with auto margins; when it is taller than the
+     space, it starts at the top and this area scrolls instead of clipping. */
+  justify-content: flex-start;
   align-items: center;
+  overflow-y: auto;
   padding: 22px 40px 80px;
 }
 .welcome {
@@ -867,8 +870,6 @@ h1 {
   }
   .empty-workspace {
     padding: 20px 21px 16px;
-    justify-content: flex-start;
-    overflow: auto;
   }
   .welcome {
     margin: auto 0;
