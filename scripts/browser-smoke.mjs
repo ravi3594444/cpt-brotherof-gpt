@@ -123,6 +123,82 @@ try {
       `${await page.locator(".user-message").count()} copies of the question`);
     await context.close();
   }
+  {
+    const { context, page } = await open();
+    await page.getByRole("button", { name: /Try a sample research question/ }).click();
+    await finished(page);
+    await page.getByRole("button", { name: /New conversation/ }).click();
+    await page.waitForSelector(".try-demo");
+    await page.locator(".scout-sidebar .history-item", { hasText: "AI agents search the web" }).click();
+    const reopened = await page.waitForSelector(".answer-body", { timeout: 5000 }).then(() => true, () => false);
+    check("a saved conversation reopens from the sidebar", reopened && (await page.locator(".user-message").count()) === 1);
+    await context.close();
+  }
+  {
+    // WebMCP: fake document.modelContext and call the registered tool.
+    const context = await browser.newContext();
+    await context.addInitScript(() => {
+      window.__tools = [];
+      document.modelContext = { registerTool: (tool) => { window.__tools.push(tool); } };
+    });
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => window.__tools.some((t) => t.name === "research_question"));
+    const result = await page.evaluate(() =>
+      window.__tools.findLast((t) => t.name === "research_question").execute({ question: "How do AI agents search the web?" }),
+    );
+    check("WebMCP research_question returns the finished answer and its sources",
+      /prepared example/.test(result.answer) && result.sources.length === 3 && result.demo === true,
+      JSON.stringify(result).slice(0, 200));
+    await context.close();
+  }
+  {
+    // With an engine connected, Sample mode starts off and the engine picker appears.
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/api/config", (route) => route.fulfill({ json: {
+      demo: false, modelConnected: true, searchConnected: true, modelName: "Test model",
+      engines: { browserUse: true, kernel: true, tavily: false, jev: false },
+    } }));
+    const bodies = [];
+    await page.route("**/api/chat", (route) => {
+      bodies.push(JSON.parse(route.request().postData()));
+      return route.fulfill({ status: 503, body: "stubbed" });
+    });
+    await page.goto(BASE, { waitUntil: "networkidle" });
+    await page.getByRole("combobox", { name: "Research engine" }).selectOption("kernel");
+    for (const question of ["What changed in the latest release?", "And the one before?"]) {
+      await page.getByRole("textbox").fill(question);
+      await page.getByRole("textbox").press("Enter");
+      await page.waitForSelector(".error-banner", { timeout: 10000 });
+    }
+    check("with an engine connected, typed questions stay live and keep the chosen engine",
+      bodies.length === 2 && bodies.every((b) => b.preview === false && b.engine === "kernel" && b.webEnabled === true),
+      JSON.stringify(bodies.map(({ preview, engine, webEnabled }) => ({ preview, engine, webEnabled }))));
+    check("  the Sample switch is still off afterwards",
+      (await page.getByRole("switch", { name: "Sample research" }).getAttribute("aria-checked")) === "false");
+    await context.close();
+  }
+  {
+    // Turning web search off must survive sending a typed question.
+    const { context, page } = await open();
+    const bodies = [];
+    page.on("request", (r) => r.url().endsWith("/api/chat") && bodies.push(JSON.parse(r.postData())));
+    await page.getByRole("switch", { name: "Search the web" }).click();
+    await page.getByRole("textbox").fill("How do AI agents search the web?");
+    await page.getByRole("textbox").press("Enter");
+    await finished(page);
+    await page.getByRole("textbox").fill("How can I check if a source is reliable?");
+    await page.getByRole("textbox").press("Enter");
+    await page.waitForFunction(() => document.querySelectorAll(".answer-actions").length === 2, null, { timeout: 20000 }).catch(() => {});
+    await finished(page);
+    check("typed questions keep web search off once it is turned off",
+      bodies.length === 2 && bodies.every((b) => b.webEnabled === false),
+      JSON.stringify(bodies.map((b) => b.webEnabled)));
+    check("  the Search the web switch is still off afterwards",
+      (await page.getByRole("switch", { name: "Search the web" }).getAttribute("aria-checked")) === "false");
+    await context.close();
+  }
   for (const [width, height] of [[1280, 720], [1366, 640], [1280, 800], [390, 844], [360, 640]]) {
     const { context, page } = await open({ width, height });
     await shot(page, `home-${width}x${height}`);

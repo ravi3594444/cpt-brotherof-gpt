@@ -96,6 +96,10 @@ import {
 } from "@/lib/chat-types";
 
 const STORAGE_KEY = "scout-threads-v1";
+// PromptInput resets its <form> on every submit, and a Radix Switch inside a form
+// snaps back to its mount-time value on reset. The composer's switches are
+// settings, not form fields, so point their form attribute at an id no form has.
+const OUTSIDE_PROMPT_FORM = "scout-composer-settings";
 const INITIAL_CONFIG: ScoutConfig = {
   demo: true,
   modelConnected: false,
@@ -646,6 +650,7 @@ function ChatWorkspace({
             <span>Search the web</span>
             <Switch
               aria-label="Search the web"
+              form={OUTSIDE_PROMPT_FORM}
               checked={webEnabled}
               onCheckedChange={setWebEnabled}
               disabled={busy || !webAvailable}
@@ -658,6 +663,7 @@ function ChatWorkspace({
             <span>Sample</span>
             <Switch
               aria-label="Sample research"
+              form={OUTSIDE_PROMPT_FORM}
               checked={preview || config.demo}
               onCheckedChange={setPreview}
               disabled={busy || config.demo}
