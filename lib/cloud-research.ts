@@ -201,7 +201,12 @@ export async function jevChooseEngine(
   key: string,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
+  progress?: Progress,
 ): Promise<BrowserEngine> {
+  const fallback = (why: string): BrowserEngine => {
+    progress?.(`JEV was ${why}; using Browser Use Cloud`);
+    return "browser_use";
+  };
   try {
     const response = await fetcher("https://api.typesafe.ai/v1/systemone", {
       method: "POST",
@@ -222,17 +227,22 @@ export async function jevChooseEngine(
       }),
       signal: AbortSignal.any([signal, AbortSignal.timeout(4500)]),
     });
-    if (!response.ok) return "browser_use";
+    if (!response.ok) return fallback("unavailable");
     const body = await response.json() as {
       answers?: { route?: { choice?: string; confidence?: number } };
     };
-    return body.answers?.route?.choice === "kernel" &&
-      (body.answers.route.confidence || 0) >= 0.65
-      ? "kernel"
-      : "browser_use";
+    const route = body.answers?.route;
+    if (route?.choice === "kernel") {
+      if ((route.confidence || 0) < 0.65) return fallback("unsure");
+      progress?.("JEV selected Kernel");
+      return "kernel";
+    }
+    if (route?.choice !== "browser_use") return fallback("unavailable");
+    progress?.("JEV selected Browser Use Cloud");
+    return "browser_use";
   } catch {
     signal.throwIfAborted();
-    return "browser_use";
+    return fallback("unavailable");
   }
 }
 
@@ -337,4 +347,25 @@ export async function kernelResearch(
       method: "DELETE", headers, signal: AbortSignal.timeout(5000),
     }).catch(() => {});
   }
+}
+
+export async function chooseResearchEngine(
+  requested: ResearchEngine,
+  keys: { browserUseKey: string; kernelKey: string; jevKey: string },
+  question: string,
+  signal: AbortSignal,
+  fetcher: Fetcher = fetch,
+  progress?: Progress,
+): Promise<Exclude<ResearchEngine, "auto">> {
+  const label = { browser_use: "Browser Use Cloud", kernel: "Kernel", tavily: "Search API" };
+  if (requested !== "auto") {
+    progress?.(`Selected ${label[requested]}`);
+    return requested;
+  }
+  // JEV reports its own decision, or why Scout fell back, through progress.
+  if (keys.browserUseKey && keys.kernelKey && keys.jevKey)
+    return jevChooseEngine(question, keys.jevKey, signal, fetcher, progress);
+  const engine = keys.browserUseKey ? "browser_use" : keys.kernelKey ? "kernel" : "tavily";
+  progress?.(`Selected ${label[engine]}`);
+  return engine;
 }

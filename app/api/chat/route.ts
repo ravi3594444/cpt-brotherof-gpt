@@ -12,9 +12,8 @@ import { demoAnswer, withoutCitations } from "@/lib/demo";
 import { extractPublicUrls, searchWeb, readPages, ResearchError } from "@/lib/research";
 import {
   browserUseResearch,
+  chooseResearchEngine,
   kernelResearch,
-  jevChooseEngine,
-  type ResearchEngine,
 } from "@/lib/cloud-research";
 import type {
   ScoutMessage,
@@ -215,21 +214,10 @@ export async function POST(request: Request) {
       if (input.webEnabled) {
         update({ phase: "searching" });
         recordStep("Choosing a research path");
-        let engine: ResearchEngine = input.engine;
-        if (engine === "auto") {
-          if (config.browserUseKey && config.kernelKey)
-            engine = config.jevKey
-              ? await jevChooseEngine(question, config.jevKey, signal)
-              : "browser_use";
-          else if (config.browserUseKey) engine = "browser_use";
-          else if (config.kernelKey) engine = "kernel";
-          else engine = "tavily";
-        }
+        const engine = await chooseResearchEngine(input.engine, config, question, signal, fetch, recordStep);
         data.engine = engine;
-        recordStep(config.jevKey && input.engine === "auto" && config.browserUseKey && config.kernelKey
-          ? `JEV selected ${engine === "kernel" ? "Kernel" : "Browser Use Cloud"}`
-          : `Selected ${engine === "kernel" ? "Kernel" : engine === "browser_use" ? "Browser Use Cloud" : "Search API"}`);
-        update({ phase: "reading", engine });
+        // The Search API path stays in "searching" until it starts reading pages.
+        update(engine === "tavily" ? { engine } : { phase: "reading", engine });
         if (engine === "browser_use" || engine === "kernel") {
           const finding = engine === "browser_use"
             ? await browserUseResearch(question, config.browserUseKey, signal, fetch, recordStep)
