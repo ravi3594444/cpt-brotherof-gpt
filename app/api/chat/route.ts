@@ -3,11 +3,11 @@ import {
   createUIMessageStreamResponse,
   generateText,
   streamText,
-  type ModelMessage,
 } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { z } from "zod";
 import { serverConfig } from "@/lib/server-config";
+import { modelConversation } from "@/lib/conversation";
 import { demoAnswer, withoutCitations } from "@/lib/demo";
 import { extractPublicUrls, searchWeb, readPages, ResearchError } from "@/lib/research";
 import {
@@ -78,18 +78,8 @@ export async function POST(request: Request) {
   } catch {
     return new Response("Send a valid question to continue.", { status: 400 });
   }
-  const messages: ModelMessage[] = input.messages.slice(-16).map((m) => ({
-    role: m.role,
-    content: m.parts
-      .filter((p) => p.type === "text")
-      .map((p) => p.text || "")
-      .join("")
-      .slice(0, 16000),
-  }));
-  const question = String(
-    messages.findLast((m) => m.role === "user")?.content || "",
-  ).trim();
-  if (!question || question.length > 6000 || messages.at(-1)?.role !== "user")
+  const { messages, question } = modelConversation(input.messages);
+  if (!question || question.length > 6000)
     return new Response("Your question must contain 1 to 6000 characters.", {
       status: 400,
     });
