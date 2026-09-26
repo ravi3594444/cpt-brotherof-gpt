@@ -9,7 +9,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { z } from "zod";
 import { serverConfig } from "@/lib/server-config";
 import { demoAnswer, withoutCitations } from "@/lib/demo";
-import { publicUrl, searchWeb, readPages, ResearchError } from "@/lib/research";
+import { extractPublicUrls, searchWeb, readPages, ResearchError } from "@/lib/research";
 import {
   browserUseResearch,
   kernelResearch,
@@ -238,13 +238,7 @@ export async function POST(request: Request) {
           data.warning = finding.warning;
         } else {
         recordStep("Search API is finding source pages");
-        const urls = [
-          ...new Set(
-            (question.match(/https?:\/\/[^\s<>"\])]+/g) || [])
-              .map(publicUrl)
-              .filter((url): url is string => !!url),
-          ),
-        ].slice(0, 4);
+        const urls = extractPublicUrls(question).slice(0, 4);
         if (urls.length) {
           data.sources = urls.map((url) => ({
             title: new URL(url).hostname,

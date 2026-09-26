@@ -1,5 +1,5 @@
 import type { ResearchSource } from "./chat-types";
-import { publicUrl, ResearchError } from "./research.ts";
+import { extractPublicUrls, publicUrl, ResearchError } from "./research.ts";
 
 export type BrowserEngine = "browser_use" | "kernel";
 export type ResearchEngine = "auto" | BrowserEngine | "tavily";
@@ -79,15 +79,12 @@ export function parseAgentSources(output: unknown, result: string | null): Resea
       : [];
   const sources = entries.map(sourceFromUnknown).filter((s): s is ResearchSource => !!s);
   if (!sources.length && result) {
-    for (const raw of result.match(/https?:\/\/[^\s<>\]\[()"'{}]+/g) || []) {
-      const url = publicUrl(raw.replace(/[.,;!?]+$/, ""));
-      if (url)
-        sources.push({
-          title: new URL(url).hostname,
-          url,
-          content: result.slice(0, 2500),
-        });
-    }
+    for (const url of extractPublicUrls(result))
+      sources.push({
+        title: new URL(url).hostname,
+        url,
+        content: result.slice(0, 2500),
+      });
   }
   return [...new Map(sources.map((s) => [s.url, s])).values()].slice(0, 6);
 }
@@ -299,15 +296,14 @@ export async function kernelResearch(
     throw new ResearchError("Kernel did not create a valid browser session.");
   progress?.("Kernel opened a separate cloud browser");
   try {
-    const candidate = question.match(/https?:\/\/[^\s<>"\])]+/);
-    const directUrl = candidate && publicUrl(candidate[0]);
+    const directUrl = extractPublicUrls(question)[0];
     progress?.(directUrl ? "Kernel is opening the supplied page" : "Kernel is finding and reading public pages");
     const result = await jsonResponse<{
       success?: boolean; result?: unknown;
     }>(
       await fetcher(`${kernelBase}/${id}/playwright/execute`, {
         method: "POST", headers,
-        body: JSON.stringify({ code: kernelScript(question, directUrl || undefined), timeout_sec: 58 }),
+        body: JSON.stringify({ code: kernelScript(question, directUrl), timeout_sec: 58 }),
         signal: AbortSignal.any([signal, AbortSignal.timeout(65000)]),
       }),
       "Kernel",
