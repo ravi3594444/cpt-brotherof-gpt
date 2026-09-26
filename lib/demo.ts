@@ -104,3 +104,8 @@ export function demoAnswer(question: string): {
     ],
   };
 }
+// Numbered citations like [1](url), for sample answers shown with web search off.
+// A URL may contain one level of balanced parentheses, as Wikimedia file names do.
+export function withoutCitations(text: string): string {
+  return text.replace(/\s*\[\d+\]\(https?:\/\/(?:[^()\s]|\([^()\s]*\))+\)/g, "");
+}

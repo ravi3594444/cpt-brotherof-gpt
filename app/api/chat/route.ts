@@ -8,7 +8,7 @@ import {
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { z } from "zod";
 import { serverConfig } from "@/lib/server-config";
-import { demoAnswer } from "@/lib/demo";
+import { demoAnswer, withoutCitations } from "@/lib/demo";
 import { publicUrl, searchWeb, readPages, ResearchError } from "@/lib/research";
 import {
   browserUseResearch,
@@ -149,9 +149,7 @@ export async function POST(request: Request) {
           });
           await wait(420, signal);
         }
-        const text = input.webEnabled
-          ? answer.text
-          : answer.text.replace(/\s*\[\d+\]\(https?:\/\/[^)]+\)/g, "");
+        const text = input.webEnabled ? answer.text : withoutCitations(answer.text);
         writer.write({ type: "text-start", id: "answer" });
         const chunks = text.match(/[\s\S]{1,36}/g) || [text];
         for (const delta of chunks) {
