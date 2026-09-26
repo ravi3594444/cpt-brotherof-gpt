@@ -50,9 +50,17 @@ Requires Node 22.13+ and pnpm:
 pnpm install
 pnpm dev
 pnpm exec tsc --noEmit
-node --test scripts/research.test.mjs scripts/cloud-research.test.mjs
+pnpm lint
+pnpm test          # unit tests for research, engine choice, links, and samples
 pnpm build
 ```
+
+With `pnpm dev` running, `pnpm test:browser` drives sample mode in Chromium:
+answers, citations, history, Try again, the composer switches, a stubbed
+connected workspace, and the layout at desktop and phone sizes. It needs no
+keys and uses Playwright from the project or a global install.
+
+`CONTEXT.md` is the glossary of Scout's domain terms.
 
 The AI Elements code in `components/ai-elements` comes from the official
 Vercel AI Elements project under Apache-2.0. The hosting build uses Cloudflare
@@ -75,8 +83,10 @@ does not simulate those native permissions.
 
 ## Tests and current limits
 
-Mocked adapter tests verify Browser Use run parsing, image/source validation,
-Kernel session cleanup, JEV choice, and legacy search error behavior. A
+Mocked adapter tests verify Browser Use run parsing (including prose around
+JSON), image/source validation, Kernel session cleanup, engine choice and the
+logged JEV outcome, pasted-link extraction, conversation preparation, and
+legacy search error behavior. A
 TypeScript check and production build cover the UI and API. The provider
 paths cannot be tested end-to-end without the separate Browser Use, Kernel,
 and optional TypeSafe keys. Browser Use Cloud runs are capped at one US dollar
