@@ -63,21 +63,34 @@ function sourceFromUnknown(value: unknown): ResearchSource | undefined {
   };
 }
 
-export function parseAgentSources(output: unknown, result: string | null): ResearchSource[] {
-  let value = output;
-  if (!value && result) {
+// Browser Use v4 may ignore outputSchema and return text: pure JSON, a fenced
+// JSON block after prose, or prose followed by a bare object.
+function jsonIn(text: string): unknown {
+  const candidates = [text, ...[...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1])];
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end > start) candidates.push(text.slice(start, end + 1));
+  for (const candidate of candidates) {
     try {
-      value = JSON.parse(result.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, ""));
+      return JSON.parse(candidate.trim());
     } catch {
-      // The agent may have answered in prose; extract only explicit public links below.
+      // Try the next candidate; prose falls back to explicit public links below.
     }
   }
+}
+
+export function parseAgentSources(output: unknown, result: string | null): ResearchSource[] {
+  const value = output || (result ? jsonIn(result) : undefined);
   const entries = Array.isArray(value)
     ? value
     : value && typeof value === "object" && Array.isArray((value as { sources?: unknown }).sources)
       ? (value as { sources: unknown[] }).sources
       : [];
-  const sources = entries.map(sourceFromUnknown).filter((s): s is ResearchSource => !!s);
+  // An agent's summary is never page text Scout read itself, whatever the agent claims.
+  const sources: ResearchSource[] = entries
+    .map(sourceFromUnknown)
+    .filter((s): s is ResearchSource => !!s)
+    .map((s) => ({ ...s, read: false }));
   if (!sources.length && result) {
     for (const url of extractPublicUrls(result))
       sources.push({
@@ -102,7 +115,7 @@ export async function browserUseResearch(
       method: "POST",
       headers,
       body: JSON.stringify({
-        task: `Research this question using the web browser: ${question.slice(0, 4000)}. Visit relevant original pages. Return a short synthesis and a JSON object with a "sources" array, each containing exact visited page "url", "title", and a concise "summary" of what that page actually says. For shopping pages include the product's actual image URL as "image" if present, never a generic photo. Do not invent or cite a page you did not visit. Do not log in, purchase, submit forms, or change any external account.`,
+        task: `Research this question using the web browser: ${question.slice(0, 4000)}. Visit relevant original pages. Reply with only a JSON object, no other text: a "summary" string and a "sources" array, each item containing the exact visited page "url", "title", and a concise "summary" of what that page actually says. For shopping pages include the product's actual image URL as "image" if present, never a generic photo. Do not invent or cite a page you did not visit. Do not log in, purchase, submit forms, or change any external account.`,
         maxCostUsd: 1,
         outputSchema: {
           type: "object",
