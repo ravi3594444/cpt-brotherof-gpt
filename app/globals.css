@@ -745,6 +745,12 @@ h1 {
 .agent-activity.open .trailing {
   transform: rotate(90deg);
 }
+.activity-warning {
+  padding: 7px 14px 0 35px;
+  color: #aab9a1;
+  font-size: 12px;
+  line-height: 1.4;
+}
 .agent-steps {
   padding: 11px 14px 2px 35px;
   display: grid;
@@ -762,6 +768,11 @@ h1 {
   color: #c9dda2;
   margin-top: 1px;
   flex: none;
+}
+/* A research try that did not finish: muted, and in the same 13px column as the checks. */
+.agent-steps svg.step-failed {
+  color: #7f9470;
+  margin: 2px 1px 0;
 }
 .source-cards {
   /* One row of every source that swipes sideways; kept off the screen edge so

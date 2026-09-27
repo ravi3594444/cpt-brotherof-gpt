@@ -105,6 +105,46 @@ test("the agent stops at its step limit and keeps the page it ended on", async (
   assert.equal(calls.deleted, true);
 });
 
+test("the agent stops when research time runs out and keeps what it read", async () => {
+  const { fetcher: services, calls } = fakeServices([article],
+    ['{"action":"read"}', '{"action":"scroll","direction":"down"}', '{"action":"scroll","direction":"down"}']);
+  // Each vision model reply takes 20 s on this clock; research must end 50 s in.
+  let now = 0;
+  const fetcher = async (url, init) => {
+    if (!url.startsWith("https://api.onkernel.com")) now += 20_000;
+    return services(url, init);
+  };
+  const { sources, warning } = await visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, fetcher, undefined,
+    { deadline: 50_000, clock: () => now });
+  assert.equal(calls.vision.length, 3);
+  assert.deepEqual(sources.map((s) => s.url), ["https://example.com/ferns"]);
+  assert.match(warning, /ran out of time/);
+  assert.equal(calls.deleted, true);
+});
+
+test("the agent does not open a browser it has no time to use", async () => {
+  const { fetcher: services } = fakeServices([article], ['{"action":"finish"}']);
+  const urls = [];
+  const fetcher = async (url, init) => {
+    urls.push(url);
+    return services(url, init);
+  };
+  await assert.rejects(
+    visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, fetcher, undefined, { deadline: 30_000, clock: () => 0 }),
+    (error) => error instanceof ResearchError && /not enough time/.test(error.message),
+  );
+  assert.deepEqual(urls, []);
+});
+
+test("closing the browser is handed to the platform, so it finishes after the response ends", async () => {
+  const { fetcher, calls } = fakeServices([article], ['{"action":"read"}', '{"action":"finish"}']);
+  const kept = [];
+  await visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, fetcher, undefined, { keepAlive: (work) => kept.push(work) });
+  assert.equal(kept.length, 1);
+  await kept[0];
+  assert.equal(calls.deleted, true);
+});
+
 test("the cloud browser is closed even when the vision model fails", async () => {
   const { fetcher, calls } = fakeServices([article], [new TypeError("network down")]);
   await assert.rejects(() => visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, fetcher));

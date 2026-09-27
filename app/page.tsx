@@ -1271,8 +1271,10 @@ function ResearchActivity({
   const [openChoice, setOpen] = useState<boolean | null>(null);
   const open = openChoice ?? active;
   const incomplete = !active && data.phase !== "complete";
-  const label = incomplete
-    ? "Research stopped"
+  // Failed research the model was told about is incomplete, also while the answer is still coming;
+  // a request cut off or cancelled stopped it.
+  const label = data.failed || incomplete
+    ? data.failed ? "Research incomplete" : "Research stopped"
     : data.demo
       ? data.phase === "complete"
         ? "Sample research complete"
@@ -1290,7 +1292,7 @@ function ResearchActivity({
     : data.engine === "browser_use" ? "Browser Use Cloud is navigating"
       : data.engine === "kernel" ? "Kernel is reading pages"
       : data.engine === "vision_agent" ? "Vision agent is browsing"
-        : data.queries[0] || "Finding relevant sources";
+        : data.queries.at(-1) || "Finding relevant sources";
   return (
     <div className={`agent-activity ${open ? "open" : ""}`}>
       <button
@@ -1307,19 +1309,21 @@ function ResearchActivity({
           <Check size={16} className="shrink-0" />
         )}
         <span className="activity-label">{label}</span>
-        <span className="activity-detail">
-          {detail}
-          {data.warning ? ` · ${data.warning}` : ""}
-        </span>
+        <span className="activity-detail">{detail}</span>
         <ChevronRight size={15} className="trailing shrink-0" />
       </button>
+      {/* Its own line, so a reason or a partial result is never cut off. */}
+      {data.warning && <p className="activity-warning">{data.warning}</p>}
       {open && !!data.steps?.length && (
         <ol className="agent-steps" aria-label="Research actions">
           {data.steps.map((step, i) => (
             <li key={i}>
-              {active && i === data.steps!.length - 1
-                ? <LoaderCircle size={13} className="spin" />
-                : <Check size={13} />}
+              {/* A research try that failed is not a finished step. */}
+              {step.startsWith("Research did not finish")
+                ? <Square size={11} className="step-failed" />
+                : active && i === data.steps!.length - 1
+                  ? <LoaderCircle size={13} className="spin" />
+                  : <Check size={13} />}
               <span>{step}</span>
             </li>
           ))}

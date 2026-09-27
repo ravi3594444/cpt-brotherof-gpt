@@ -12,6 +12,8 @@ export type ResearchData = {
   sources: ResearchSource[];
   demo: boolean;
   warning?: string;
+  // Research failed and the answer model was told why (the warning): "Research incomplete".
+  failed?: boolean;
   engine?: "browser_use" | "kernel" | "vision_agent" | "tavily";
   steps?: string[];
 };

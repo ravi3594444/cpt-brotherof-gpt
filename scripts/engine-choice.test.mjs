@@ -88,6 +88,31 @@ test("JEV is offered only the engines that are connected", async () => {
   assert.deepEqual(criteria, ["kernel", "vision_agent"]);
 });
 
+test("Auto leaves out browser agents that need more time than research has left", async () => {
+  const keys = { ...allKeys, visionAgent: true };
+  const pick = async (timeLeft, fetcher = noJevCall) => {
+    const steps = [];
+    const engine = await chooseResearchEngine("auto", keys, "a question", signal, fetcher, (s) => steps.push(s), timeLeft);
+    return { engine, steps };
+  };
+  assert.deepEqual(await pick(40_000), {
+    engine: "kernel",
+    steps: ["Not enough time is left for Browser Use Cloud or Vision agent", "Selected Kernel"],
+  });
+  let criteria;
+  const jevSeeing = async (_url, init) => {
+    criteria = Object.keys(JSON.parse(init.body).questions.route.criteria).sort();
+    return Response.json({ answers: { route: { choice: "vision_agent", confidence: 0.8 } } });
+  };
+  assert.equal((await pick(50_000, jevSeeing)).engine, "vision_agent");
+  assert.deepEqual(criteria, ["kernel", "vision_agent"]);
+  // With time for all of them, or when no engine fits, nothing is left out.
+  assert.equal((await pick(120_000, jevAnswers("browser_use", 0.9))).engine, "browser_use");
+  assert.deepEqual(await pick(10_000, jevAnswers("kernel", 0.9)), { engine: "kernel", steps: ["JEV selected Kernel"] });
+  // An engine the user chose is kept; it says itself when time is too short.
+  assert.equal(await chooseResearchEngine("browser_use", keys, "q", signal, noJevCall, undefined, 10_000), "browser_use");
+});
+
 test("Auto without JEV prefers Browser Use Cloud, then the vision agent, then Kernel", async () => {
   assert.equal((await choose("auto", { ...allKeys, jev: undefined, visionAgent: true })).engine, "browser_use");
   assert.equal((await choose("auto", { ...allKeys, browserUseKey: "", jev: undefined, visionAgent: true })).engine, "vision_agent");

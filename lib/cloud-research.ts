@@ -1,13 +1,31 @@
 import type { ResearchSource } from "./chat-types";
-import { extractPublicUrls, publicUrl, ResearchError } from "./research.ts";
+import { extractPublicUrls, isSearchPage, publicUrl, repeats, ResearchError } from "./research.ts";
 
 export type BrowserEngine = "browser_use" | "kernel" | "vision_agent";
 export type ResearchEngine = "auto" | BrowserEngine | "tavily";
 type Fetcher = typeof fetch;
 type BrowserResult = { sources: ResearchSource[]; warning?: string };
 type Progress = (description: string) => void;
+/** When research must end (epoch ms), and the clock it runs on; tests pass a fake clock. */
+export type ResearchTime = {
+  deadline?: number;
+  clock?: () => number;
+  nap?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** A signal that aborts a request after `ms`. */
+  timeout?: (ms: number) => AbortSignal;
+  /** Keeps cleanup (closing a paid browser) running after the response ends: the platform's waitUntil. */
+  keepAlive?: (work: Promise<unknown>) => void;
+};
 
-const browserUseBase = "https://api.browser-use.com/api/v4/runs";
+const browserUseApi = "https://api.browser-use.com/api/v4";
+const browserUseBase = `${browserUseApi}/runs`;
+const UUID = /^[0-9a-f-]{36}$/i;
+// Status reads have their own rate bucket. Polling stops this long before the
+// deadline, to read the run's events for the pages the agent reached.
+const POLL_MS = 2000;
+const SALVAGE_MS = 8000;
+const OUT_OF_TIME = "The browser agent ran out of time; these are the pages it had reached";
+const STOPPED_EARLY = "The browser agent stopped early; these are the pages it had reached";
 export const kernelBase = "https://api.onkernel.com/browsers";
 export const ENGINE_LABELS: Record<Exclude<ResearchEngine, "auto">, string> = {
   browser_use: "Browser Use Cloud",
@@ -15,6 +33,12 @@ export const ENGINE_LABELS: Record<Exclude<ResearchEngine, "auto">, string> = {
   vision_agent: "Vision agent",
   tavily: "Search API",
 };
+// The least time left for which an engine opens a paid browser: Browser Use must
+// start its agent and still read what it reached, the vision agent needs a few
+// steps, and Kernel reads its pages in one go.
+export const ENGINE_MIN_MS: Record<BrowserEngine, number> = { browser_use: 60_000, vision_agent: 45_000, kernel: 20_000 };
+export const notEnoughTime = (engine: BrowserEngine) =>
+  new ResearchError(`There is not enough time left for ${engine === "vision_agent" ? "the vision agent" : ENGINE_LABELS[engine]} to research this. Try a narrower question.`);
 // What JEV weighs for each engine it may choose.
 const JEV_CRITERIA: Record<BrowserEngine, string> = {
   kernel: "Read a public page URL or quickly search and extract a few straightforward public pages.",
@@ -45,6 +69,7 @@ export async function jsonResponse<T>(response: Response, service: string): Prom
           : response.status === 429
             ? `${service} is rate limited. Try again later.`
             : `${service} could not complete this request (HTTP ${response.status}).`,
+      { retryable: !repeats(response.status) },
     );
   try {
     return (await response.json()) as T;
@@ -114,16 +139,102 @@ export function parseAgentSources(output: unknown, result: string | null): Resea
   return [...new Map(sources.map((s) => [s.url, s])).values()].slice(0, 6);
 }
 
+// Run event shapes vary by tool, so Scout reads any object with a page address,
+// with its title and the text the agent extracted or noted there.
+const EVENT_URL = /^(url|page_?url|current_?url|href)$/i;
+const EVENT_TITLE = /^(title|page_?title)$/i;
+const EVENT_TEXT = /^(extracted_?content|extracted|content|text|summary|notes?|memory|result|output|observation|findings?)$/i;
+// Prompts and live browser links are never evidence.
+const EVENT_SKIP = /^(messages|prompt|system|task|instructions|live_?view_?url|cdp_?url|screenshot)$/i;
+
+/** A public page worth keeping: not a search page, Browser Use itself, or a signed file link. */
+function agentPageUrl(value: string): string | undefined {
+  const url = publicUrl(value);
+  if (!url) return;
+  const { hostname, search } = new URL(url);
+  if (isSearchPage(url) || /(^|\.)browser-use\.com$/.test(hostname) || /[?&](x-amz-|signature=|sig=|token=|expires=)/i.test(search))
+    return;
+  return url;
+}
+
+/** The pages a browser agent reached, from its run events. They are its observations, never Read. */
+function pagesFromEvents(events: unknown[]): ResearchSource[] {
+  const pages = new Map<string, { title?: string; notes: string[] }>();
+  // Text without an address belongs to the page the agent is on.
+  let current: string | undefined;
+  const visit = (value: unknown, depth: number) => {
+    if (!value || typeof value !== "object" || depth > 4) return;
+    if (Array.isArray(value)) {
+      for (const item of value.slice(0, 50)) visit(item, depth + 1);
+      return;
+    }
+    const entries = Object.entries(value).filter(([key]) => !EVENT_SKIP.test(key));
+    const address = entries.find(([key, v]) => EVENT_URL.test(key) && typeof v === "string")?.[1] as string | undefined;
+    const url = address === undefined ? undefined : agentPageUrl(address);
+    if (address !== undefined) current = url;
+    if (url && !pages.has(url)) pages.set(url, { notes: [] });
+    for (const [key, v] of entries) {
+      if (typeof v !== "string") visit(v, depth + 1);
+      else if (url && EVENT_TITLE.test(key) && v.trim()) pages.get(url)!.title ??= v.trim().slice(0, 220);
+      else if (current && EVENT_TEXT.test(key)) {
+        const text = v.trim().replace(/\s+/g, " ").slice(0, 1200);
+        const notes = pages.get(current)!.notes;
+        // Words, not ids or encoded data.
+        if (text.length >= 20 && text.includes(" ") && !notes.includes(text) && notes.length < 4) notes.push(text);
+      }
+    }
+  };
+  for (const event of events.slice(0, 1000)) {
+    const { type, data } = (event && typeof event === "object" ? event : {}) as { type?: unknown; data?: unknown };
+    // Browser events carry the live browser link; artifacts and files are signed downloads.
+    if (typeof type === "string" && /^browser\.|artifact|file/i.test(type)) continue;
+    visit(data, 0);
+  }
+  const reached = [...pages].sort(([, a], [, b]) => Number(!a.notes.length) - Number(!b.notes.length));
+  return reached.slice(0, 6).map(([url, page]) => ({
+    url,
+    title: page.title || new URL(url).hostname,
+    content: page.notes.join("\n\n").slice(0, 2500),
+    read: false,
+  }));
+}
+
+/** The cloud browsers a run used, from its browser.ready and browser.reattached events. */
+function browsersInEvents(events: unknown[]): string[] {
+  const ids = new Set<string>();
+  for (const event of events) {
+    const { type, data } = (event && typeof event === "object" ? event : {}) as { type?: unknown; data?: { browser_session_id?: unknown } };
+    const id = data?.browser_session_id;
+    if ((type === "browser.ready" || type === "browser.reattached") && typeof id === "string" && UUID.test(id)) ids.add(id);
+  }
+  return [...ids];
+}
+
 export async function browserUseResearch(
   question: string,
   key: string,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
+  time: ResearchTime = {},
 ): Promise<BrowserResult> {
+  const clock = time.clock ?? Date.now;
+  const sleep = time.nap ?? nap;
+  const deadline = time.deadline ?? clock() + 180_000;
+  const timeout = time.timeout ?? ((ms: number) => AbortSignal.timeout(ms));
+  if (deadline - clock() < ENGINE_MIN_MS.browser_use) throw notEnoughTime("browser_use");
   const headers = { "X-Browser-Use-API-Key": key, "Content-Type": "application/json" };
-  const created = await jsonResponse<{ id?: string }>(
-    await fetcher(browserUseBase, {
+  const read = async <T>(path: string, ms = 10000) =>
+    jsonResponse<T>(
+      await fetcher(`${browserUseApi}${path}`, {
+        headers,
+        signal: AbortSignal.any([signal, timeout(Math.max(1000, Math.min(ms, deadline - clock())))]),
+      }),
+      "Browser Use Cloud",
+    );
+  let response: Response;
+  try {
+    response = await fetcher(browserUseBase, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -150,35 +261,71 @@ export async function browserUseResearch(
           required: ["summary", "sources"],
         },
       }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
-    }),
-    "Browser Use Cloud",
-  );
-  if (!created.id || !/^[0-9a-f-]{36}$/i.test(created.id))
+      signal: AbortSignal.any([signal, timeout(Math.min(30_000, deadline - clock()))]),
+    });
+  } catch {
+    signal.throwIfAborted();
+    // The run may exist without Scout hearing back; starting another would bill twice.
+    throw new ResearchError(
+      "Browser Use Cloud did not confirm the new run, which may still be running. Try again in a few minutes.",
+      { retryable: false },
+    );
+  }
+  const created = await jsonResponse<{ id?: string; sessionId?: string }>(response, "Browser Use Cloud");
+  if (!created.id || !UUID.test(created.id))
     throw new ResearchError("Browser Use Cloud did not create a valid run.");
   const runId = created.id;
+  const sessionId = created.sessionId && UUID.test(created.sessionId) ? created.sessionId : undefined;
   progress?.("Browser Use Cloud opened a managed browser");
   let finished = false;
-  let lastStatus = "";
-  try {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < 75000) {
-      signal.throwIfAborted();
-      const run = await jsonResponse<{
-        status?: string; result?: string | null; output?: unknown;
-      }>(
-        await fetcher(`${browserUseBase}/${runId}`, {
-          headers,
-          signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
-        }),
-        "Browser Use Cloud",
-      );
-      if (run.status && run.status !== lastStatus) {
-        lastStatus = run.status;
-        if (run.status === "running") progress?.("Browser agent is visiting pages");
+  let browsers: string[] = [];
+  // Reads the run's events (bounded, before the deadline) for the pages the agent reached.
+  const salvage = async (warning: string): Promise<BrowserResult | undefined> => {
+    const events: unknown[] = [];
+    let after = 0;
+    for (let page = 0; page < 5 && deadline - clock() > 1000; page++) {
+      try {
+        const got = await read<{ events?: unknown[]; nextAfter?: number | null; hasMore?: boolean }>(
+          `/runs/${runId}/events?after=${after}&limit=200`,
+          5000,
+        );
+        if (Array.isArray(got.events)) events.push(...got.events);
+        if (!got.hasMore || typeof got.nextAfter !== "number" || got.nextAfter <= after) break;
+        after = got.nextAfter;
+      } catch {
+        signal.throwIfAborted();
+        break;
       }
-      if (run.status === "completed") {
+    }
+    browsers = browsersInEvents(events);
+    const sources = pagesFromEvents(events);
+    if (!sources.length) return;
+    progress?.(`Kept ${sources.length} ${sources.length === 1 ? "page" : "pages"} the browser agent had reached`);
+    return { sources, warning };
+  };
+  let status = "";
+  let misses = 0;
+  let pollError: unknown;
+  try {
+    while (clock() < deadline - SALVAGE_MS) {
+      signal.throwIfAborted();
+      try {
+        // A slow poll ends where the salvage window starts, so the events can still be read.
+        const polled = (await read<{ status?: string }>(`/runs/${runId}/status`, Math.min(10000, deadline - SALVAGE_MS - clock()))).status;
+        misses = 0;
+        if (polled && polled !== status) {
+          status = polled;
+          if (status === "running") progress?.("Browser agent is visiting pages");
+        }
+      } catch (error) {
+        signal.throwIfAborted();
+        // One slow or throttled poll is not the end of the run; three in a row are.
+        pollError = error;
+        if (++misses >= 3) break;
+      }
+      if (status === "completed") {
         finished = true;
+        const run = await read<{ result?: string | null; output?: unknown }>(`/runs/${runId}`);
         const sources = parseAgentSources(run.output, run.result || null);
         progress?.(`Browser agent collected ${sources.length} source links`);
         if (!sources.length)
@@ -187,24 +334,48 @@ export async function browserUseResearch(
           );
         return { sources, warning: "Browser agent summaries; open original pages to verify" };
       }
-      if (run.status === "failed" || run.status === "cancelled") {
+      if (status === "failed" || status === "cancelled") {
         finished = true;
+        const kept = await salvage(STOPPED_EARLY);
+        if (kept) return kept;
         throw new ResearchError("The Browser Use Cloud run did not complete. Try again.");
       }
-      await nap(1800, signal);
+      // After a failed poll, wait out the rate limiter's five-second window.
+      await sleep(Math.min(misses ? 5000 : POLL_MS, Math.max(0, deadline - SALVAGE_MS - clock())), signal);
     }
+    const unanswered = misses >= 3;
+    progress?.(unanswered ? "Browser Use Cloud stopped responding" : "Browser agent reached the time limit");
+    const kept = await salvage(unanswered ? STOPPED_EARLY : OUT_OF_TIME);
+    if (kept) return kept;
+    if (unanswered && pollError instanceof ResearchError) throw pollError;
     throw new ResearchError(
-      "The browser agent took too long. Try a narrower question or choose Kernel.",
+      unanswered
+        ? "Browser Use Cloud stopped responding. Try again or choose Kernel."
+        : status === "running"
+          ? "The browser agent ran out of time before it reached a usable page. Try a narrower question or choose Kernel."
+          : "Browser Use Cloud did not start its browser agent in time. Try again or choose Kernel.",
     );
   } finally {
-    if (!finished) {
-      // Release a remote run when Scout stops polling; do not delay the response.
-      void fetcher(`${browserUseBase}/${runId}/cancel`, {
-        method: "POST",
-        headers,
-        signal: AbortSignal.timeout(5000),
-      }).catch(() => {});
-    }
+    // Release the run and its cloud browser without delaying the answer: a run
+    // Scout stopped polling is cancelled, and a browser outlives its run until stopped.
+    const quick = () => AbortSignal.timeout(5000);
+    const release = (async () => {
+      if (!finished)
+        await fetcher(`${browserUseBase}/${runId}/cancel`, { method: "POST", headers, signal: quick() }).catch(() => {});
+      let ids = browsers;
+      if (!ids.length && sessionId) {
+        const list = await jsonResponse<{ items?: Array<{ id?: unknown }> }>(
+          await fetcher(`${browserUseApi}/browsers?agentSessionId=${sessionId}&filterBy=active`, { headers, signal: quick() }),
+          "Browser Use Cloud",
+        );
+        ids = (list.items || []).flatMap((b) => (typeof b.id === "string" && UUID.test(b.id) ? [b.id] : []));
+      }
+      await Promise.all(ids.map((id) =>
+        fetcher(`${browserUseApi}/browsers/${id}`, {
+          method: "PATCH", headers, body: JSON.stringify({ action: "stop" }), signal: quick(),
+        }).catch(() => {})));
+    })().catch(() => {});
+    time.keepAlive?.(release);
   }
 }
 
@@ -326,7 +497,12 @@ export async function kernelResearch(
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
+  time: ResearchTime = {},
 ): Promise<BrowserResult> {
+  const clock = time.clock ?? Date.now;
+  const left = () => (time.deadline ?? Infinity) - clock();
+  // Kernel reads its pages in one go; without time for that, do not open (and pay for) a browser.
+  if (left() < ENGINE_MIN_MS.kernel) throw notEnoughTime("kernel");
   const headers = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
   const browser = await jsonResponse<{ session_id?: string }>(
     await fetcher(kernelBase, {
@@ -341,13 +517,16 @@ export async function kernelResearch(
   try {
     const directUrl = extractPublicUrls(question)[0];
     progress?.(directUrl ? "Kernel is opening the supplied page" : "Kernel is finding and reading public pages");
+    // The script, and the request waiting for it, end before research must.
+    const seconds = Math.min(58, Math.floor((left() - 7000) / 1000));
+    if (seconds < 5) throw notEnoughTime("kernel");
     const result = await jsonResponse<{
       success?: boolean; result?: unknown;
     }>(
       await fetcher(`${kernelBase}/${id}/playwright/execute`, {
         method: "POST", headers,
-        body: JSON.stringify({ code: kernelScript(question, directUrl), timeout_sec: 58 }),
-        signal: AbortSignal.any([signal, AbortSignal.timeout(65000)]),
+        body: JSON.stringify({ code: kernelScript(question, directUrl), timeout_sec: seconds }),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(seconds * 1000 + 7000)]),
       }),
       "Kernel",
     );
@@ -363,9 +542,11 @@ export async function kernelResearch(
     return { sources };
   } finally {
     // A session costs money while open; cleanup also happens when extraction fails.
-    await fetcher(`${kernelBase}/${id}`, {
+    const closing = fetcher(`${kernelBase}/${id}`, {
       method: "DELETE", headers, signal: AbortSignal.timeout(5000),
     }).catch(() => {});
+    time.keepAlive?.(closing);
+    await closing;
   }
 }
 
@@ -376,17 +557,24 @@ export async function chooseResearchEngine(
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
+  /** Time research has left (ms); Auto leaves out engines that need more. */
+  timeLeft = Infinity,
 ): Promise<Exclude<ResearchEngine, "auto">> {
   if (requested !== "auto") {
     progress?.(`Selected ${ENGINE_LABELS[requested]}`);
     return requested;
   }
   // In order of preference when JEV is not asked.
-  const available: BrowserEngine[] = [
+  const connected: BrowserEngine[] = [
     ...(keys.browserUseKey ? ["browser_use" as const] : []),
     ...(keys.visionAgent ? ["vision_agent" as const] : []),
     ...(keys.kernelKey ? ["kernel" as const] : []),
   ];
+  // When no engine fits, the chosen one says there is not enough time.
+  const fits = connected.filter((e) => timeLeft >= ENGINE_MIN_MS[e]);
+  const available = fits.length ? fits : connected;
+  const skipped = connected.filter((e) => !available.includes(e));
+  if (skipped.length) progress?.(`Not enough time is left for ${skipped.map((e) => ENGINE_LABELS[e]).join(" or ")}`);
   // JEV reports its own decision, or why Scout fell back, through progress.
   if (available.length >= 2 && keys.jev)
     return jevChooseEngine(question, keys.jev, signal, fetcher, progress, available);
