@@ -9,17 +9,18 @@ import {
   BookOpen,
   Check,
   ChevronRight,
-  CircleHelp,
   Compass,
   Copy,
   ExternalLink,
   Globe2,
+  Image as ImageIcon,
   LoaderCircle,
   MessageSquare,
   Plus,
   Search,
   Settings2,
   Smartphone,
+  SquarePen,
   Zap,
   ShieldCheck,
   Sparkles,
@@ -54,7 +55,17 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
-import { Switch } from "@/components/ui/switch";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { LogoReveal } from "@/components/logo-reveal";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import {
@@ -75,13 +86,8 @@ import {
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
 import {
-  Sources,
-  SourcesTrigger,
-  SourcesContent,
-  Source,
-} from "@/components/ai-elements/sources";
-import {
   DEMO_QUESTION,
+  PHOTO_SAMPLE,
   SUGGESTIONS,
   messageText,
   researchData,
@@ -94,10 +100,15 @@ import {
 } from "@/lib/chat-types";
 
 const STORAGE_KEY = "scout-threads-v1";
-// PromptInput resets its <form> on every submit, and a Radix Switch inside a form
-// snaps back to its mount-time value on reset. The composer's switches are
-// settings, not form fields, so point their form attribute at an id no form has.
-const OUTSIDE_PROMPT_FORM = "scout-composer-settings";
+// Show every source as a card, up to the most any research engine returns.
+const MAX_SOURCE_CARDS = 8;
+type Suggestion = (typeof SUGGESTIONS)[number] | typeof PHOTO_SAMPLE;
+function SuggestionIcon({ icon }: { icon: Suggestion["icon"] }) {
+  if (icon === "globe") return <Globe2 size={16} />;
+  if (icon === "compare") return <GitCompareArrows size={16} />;
+  if (icon === "image") return <ImageIcon size={16} />;
+  return <BookOpen size={16} />;
+}
 const INITIAL_CONFIG: ScoutConfig = {
   demo: true,
   modelConnected: false,
@@ -212,6 +223,8 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handler);
   }, [newChat]);
   return (
+    <>
+    <LogoReveal />
     <SidebarProvider
       className="scout-app"
       style={{ "--sidebar-width": "252px" } as React.CSSProperties}
@@ -233,6 +246,7 @@ export default function Home() {
         config={config}
         onSave={saveThread}
         onSettings={() => setSettingsOpen(true)}
+        onNew={() => newChat()}
       />
       <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
         <DialogContent>
@@ -360,6 +374,7 @@ export default function Home() {
       </Dialog>
       <Toaster theme="dark" position="top-center" />
     </SidebarProvider>
+    </>
   );
 }
 
@@ -461,6 +476,7 @@ function ChatWorkspace({
   config,
   onSave,
   onSettings,
+  onNew,
 }: {
   id: string;
   initialMessages: ScoutMessage[];
@@ -468,6 +484,7 @@ function ChatWorkspace({
   config: ScoutConfig;
   onSave: (id: string, m: ScoutMessage[]) => void;
   onSettings: () => void;
+  onNew: () => void;
 }) {
   const [webSelected, setWebEnabled] = useState(true);
   // Sample mode starts on until a research engine is connected; the switch overrides it.
@@ -600,7 +617,6 @@ function ChatWorkspace({
     setReaderSources(sources);
     setReaderOpen(true);
   };
-  const latestResearch = messages.map(researchData).findLast(Boolean);
   const copy = async (m: ScoutMessage) => {
     try {
       const sources = researchData(m)?.sources || [];
@@ -628,80 +644,79 @@ function ChatWorkspace({
     >
       <PromptInputTextarea
         aria-label={messages.length ? "Ask a follow-up" : "Ask Scout anything"}
-        placeholder={
-          messages.length
-            ? "Ask a follow-up…"
-            : "Ask anything, or paste a link to explore…"
-        }
+        placeholder={messages.length ? "Ask a follow-up" : "Ask anything"}
         value={input}
         maxLength={6000}
         onChange={(e) => setInput(e.target.value)}
       />
       <PromptInputFooter className="composer-footer">
         <div className="composer-tools">
-          <label className={`search-mode ${webEnabled ? "active" : ""}`}>
-            <Globe2 size={15} />
-            <span>Search the web</span>
-            <Switch
-              aria-label="Search the web"
-              form={OUTSIDE_PROMPT_FORM}
-              checked={webEnabled}
-              onCheckedChange={setWebEnabled}
-              disabled={busy || !webAvailable}
-              size="sm"
-              className="ml-1"
-            />
-          </label>
-          <label className={`search-mode ${preview ? "active" : ""}`}>
-            <Sparkles size={14} />
-            <span>Sample</span>
-            <Switch
-              aria-label="Sample research"
-              form={OUTSIDE_PROMPT_FORM}
-              checked={preview || config.demo}
-              onCheckedChange={setPreview}
-              disabled={busy || config.demo}
-              size="sm"
-              className="ml-1"
-            />
-          </label>
-          {!preview && config.searchConnected && (
-            <select
-              className="engine-picker"
-              aria-label="Research engine"
-              value={engine}
-              onChange={(e) => setEngine(e.target.value as typeof engine)}
-              disabled={busy}
-            >
-              <option value="auto">Auto browser</option>
-              {config.engines.browserUse && <option value="browser_use">Browser Use Cloud</option>}
-              {config.engines.kernel && <option value="kernel">Kernel</option>}
-              {config.engines.tavily && <option value="tavily">Search API</option>}
-            </select>
-          )}
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="research-caption">
-            <ShieldCheck size={13} />
-            {webEnabled ? preview ? "Sample sources" : "Answers with sources" : "Chat without search"}
-          </span>
-          <PromptInputSubmit
-            status={status}
-            onStop={() => {
-              void stop();
-              toast("Research stopped");
-            }}
-            disabled={!busy && !input.trim()}
-            className="send-button"
-            aria-label={busy ? "Stop research" : "Send question"}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button type="button" className="composer-icon" aria-label="More options" disabled={busy}>
+                <Plus size={20} />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="top" sideOffset={10} className="composer-menu">
+              <DropdownMenuCheckboxItem
+                checked={preview || config.demo}
+                disabled={config.demo}
+                onCheckedChange={(checked) => setPreview(checked === true)}
+              >
+                <Sparkles size={16} />
+                Sample answers
+              </DropdownMenuCheckboxItem>
+              {config.demo && (
+                <p className="composer-menu-note">
+                  On until an AI model is connected to this workspace.
+                </p>
+              )}
+              {!preview && config.searchConnected && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Research engine</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup
+                    value={engine}
+                    onValueChange={(value) => setEngine(value as typeof engine)}
+                  >
+                    <DropdownMenuRadioItem value="auto">Auto</DropdownMenuRadioItem>
+                    {config.engines.browserUse && <DropdownMenuRadioItem value="browser_use">Browser Use Cloud</DropdownMenuRadioItem>}
+                    {config.engines.kernel && <DropdownMenuRadioItem value="kernel">Kernel</DropdownMenuRadioItem>}
+                    {config.engines.tavily && <DropdownMenuRadioItem value="tavily">Search API</DropdownMenuRadioItem>}
+                  </DropdownMenuRadioGroup>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <button
+            type="button"
+            className={`web-chip ${webEnabled ? "active" : ""}`}
+            aria-label="Search the web"
+            aria-pressed={webEnabled}
+            title={webAvailable ? undefined : "Add a Browser Use Cloud or Kernel key to search the web"}
+            disabled={busy || !webAvailable}
+            onClick={() => setWebEnabled(!webSelected)}
           >
-            {busy ? (
-              <Square size={14} fill="currentColor" />
-            ) : (
-              <ArrowUp size={19} />
-            )}
-          </PromptInputSubmit>
+            <Globe2 size={16} />
+            <span>Web</span>
+          </button>
         </div>
+        <PromptInputSubmit
+          status={status}
+          onStop={() => {
+            void stop();
+            toast("Research stopped");
+          }}
+          disabled={!busy && !input.trim()}
+          className="send-button"
+          aria-label={busy ? "Stop research" : "Send question"}
+        >
+          {busy ? (
+            <Square size={14} fill="currentColor" />
+          ) : (
+            <ArrowUp size={19} />
+          )}
+        </PromptInputSubmit>
       </PromptInputFooter>
     </PromptInput>
   );
@@ -710,91 +725,34 @@ function ChatWorkspace({
       <header className="topbar">
         <SidebarTrigger className="mobile-menu" />
         <span className="topbar-title">Scout</span>
-        <span className="topbar-slash">/</span>
-        <span className="topbar-label">Your research companion</span>
-        <div className="header-right">
+        {(preview || config.demo) && (
           <button className="mode-badge" onClick={onSettings}>
-            {preview || config.demo
-              ? "Sample mode"
-              : config.searchConnected
-                ? "Connected"
-                : "Live chat"}
+            Sample
           </button>
-          {latestResearch?.sources.length ? (
-            <button
-              className="icon-button"
-              onClick={() => openSources(latestResearch.sources)}
-              aria-label="Open sources"
-            >
-              <BookOpen size={18} />
-            </button>
-          ) : (
-            <button
-              className="icon-button"
-              onClick={onSettings}
-              aria-label="About Scout"
-            >
-              <CircleHelp size={18} />
-            </button>
-          )}
+        )}
+        <div className="header-right">
+          <button className="icon-button topbar-new" onClick={onNew} aria-label="New conversation">
+            <SquarePen size={19} />
+          </button>
         </div>
       </header>
       <div className="workspace">
         {messages.length === 0 ? (
           <div className="empty-workspace">
-            <div className="welcome">
-              <div className="welcome-symbol">
-                <Mark size={30} />
-                <span>A world of answers, a question away.</span>
+            <div className="home">
+              <div className="home-hero">
+                <Mark size={34} />
+                <h1>What do you want to research?</h1>
               </div>
-              <h1>
-                Follow your curiosity.
-                <br />
-                <span>Find your next answer.</span>
-              </h1>
-              <p className="welcome-subtitle">
-                Ask a question. Explore the web. See the sources.
-              </p>
-              {composer}
-              <div className="suggestion-grid">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    className="suggestion"
-                    key={s.text}
-                    onClick={() => void submit(s.text)}
-                  >
-                    {s.icon === "globe" ? (
-                      <Globe2 size={20} />
-                    ) : s.icon === "compare" ? (
-                      <GitCompareArrows size={20} />
-                    ) : (
-                      <BookOpen size={20} />
-                    )}
-                    <span className="suggestion-title">{s.label}</span>
-                    <span className="suggestion-category">{s.category}</span>
+              <div className="home-composer">{composer}</div>
+              <div className="suggestion-chips">
+                {(preview || config.demo ? [SUGGESTIONS[0], SUGGESTIONS[1], PHOTO_SAMPLE] : SUGGESTIONS).map((s) => (
+                  <button className="suggestion-chip" key={s.text} onClick={() => void submit(s.text)}>
+                    <SuggestionIcon icon={s.icon} />
+                    <span>{s.text}</span>
                   </button>
                 ))}
               </div>
-              {(preview || config.demo) && (
-                <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-                  <button
-                    className="try-demo"
-                    onClick={() => void submit(DEMO_QUESTION)}
-                  >
-                    <Sparkles size={13} />
-                    Try a sample research question
-                    <ArrowUpRight size={13} />
-                  </button>
-                  <button
-                    className="try-demo"
-                    onClick={() => void submit("Show me a photo source card")}
-                  >
-                    <BookOpen size={13} />
-                    Preview an image source card
-                    <ArrowUpRight size={13} />
-                  </button>
-                </div>
-              )}
             </div>
           </div>
         ) : (
@@ -824,28 +782,18 @@ function ChatWorkspace({
                       key={message.id}
                       className="assistant-message"
                     >
-                      <div className="assistant-heading">
-                        <Mark size={25} />
-                        <span>Scout</span>
-                        {(research?.demo || message.metadata?.demo) && (
-                          <span className="ml-1 text-xs font-normal text-muted-foreground">
-                            Sample answer
-                          </span>
-                        )}
-                      </div>
+                      {(research?.demo || message.metadata?.demo) && (
+                        <span className="assistant-tag">Sample answer</span>
+                      )}
                       {research && (
-                        <ResearchActivity
-                          data={research}
-                          active={busy && isLast}
-                          onOpen={() => openSources(research.sources)}
-                        />
-                      )}{" "}
+                        <ResearchActivity data={research} active={busy && isLast} />
+                      )}
                       {!!research?.sources.length && (
-                        <>
-                          <div className={`source-cards ${research.sources.some((s) => s.image) ? "has-images" : ""}`}>
-                            {research.sources.slice(0, 3).map((s, i) => (
+                          <div className="source-cards" role="list" aria-label="Sources">
+                            {research.sources.slice(0, MAX_SOURCE_CARDS).map((s, i) => (
                               <a
                                 className="source-card"
+                                role="listitem"
                                 key={s.url}
                                 href={safeSourceUrl(s.url)}
                                 target="_blank"
@@ -874,22 +822,6 @@ function ChatWorkspace({
                               </a>
                             ))}
                           </div>
-                          <Sources>
-                            <SourcesTrigger
-                              count={research.sources.length}
-                              className="text-[13px]"
-                            />
-                            <SourcesContent>
-                              {research.sources.map((s, i) => (
-                                <Source
-                                  key={s.url}
-                                  href={safeSourceUrl(s.url)}
-                                  title={`${i + 1}. ${s.title}`}
-                                />
-                              ))}
-                            </SourcesContent>
-                          </Sources>
-                        </>
                       )}
                       {text && (
                         <MessageContent className="!w-full !overflow-visible">
@@ -986,15 +918,13 @@ function ChatWorkspace({
               <ConversationScrollButton className="bg-card border-border" />
             </Conversation>
             <div className="bottom-composer">{composer}</div>
+            <div className="footer-note">
+              {preview || config.demo
+                ? "Sample answers · no live research"
+                : "Scout can make mistakes. Check the sources."}
+            </div>
           </>
         )}
-        <div className="footer-note">
-          {preview || config.demo
-            ? "Sample mode · Example answers and source links. Turn Sample off for live chat."
-            : config.searchConnected
-              ? "Scout can make mistakes. Check the sources that matter."
-              : "Live chat is connected. Web research is waiting for a browser key."}
-        </div>
       </div>
       <Sheet open={readerOpen} onOpenChange={setReaderOpen}>
         <SheetContent className="w-full sm:max-w-[460px]">
@@ -1045,12 +975,13 @@ function ChatWorkspace({
 function ResearchActivity({
   data,
   active,
-  onOpen,
 }: {
   data: ResearchData;
   active: boolean;
-  onOpen: () => void;
 }) {
+  // Steps show while research runs, then fold into one line; a tap reopens them.
+  const [openChoice, setOpen] = useState<boolean | null>(null);
+  const open = openChoice ?? active;
   const incomplete = !active && data.phase !== "complete";
   const label = incomplete
     ? "Research stopped"
@@ -1058,44 +989,42 @@ function ResearchActivity({
       ? data.phase === "complete"
         ? "Sample research complete"
         : "Exploring the sample research"
-      : incomplete
-        ? "Research interrupted"
-        : data.phase === "searching"
-          ? "Searching the web"
-          : data.phase === "reading"
-            ? "Reading relevant pages"
-            : data.phase === "writing"
-              ? "Putting the answer together"
-              : "Research complete";
+      : data.phase === "searching"
+        ? "Searching the web"
+        : data.phase === "reading"
+          ? "Reading relevant pages"
+          : data.phase === "writing"
+            ? "Putting the answer together"
+            : "Research complete";
+  const engine = data.engine === "browser_use" ? "Browser Use Cloud" : data.engine === "kernel" ? "Kernel" : data.engine ? "Search API" : "";
+  const detail = data.sources.length
+    ? `${data.sources.length} ${data.sources.length === 1 ? "source" : "sources"}${engine ? ` · ${engine}` : ""}`
+    : data.engine === "browser_use" ? "Browser Use Cloud is navigating"
+      : data.engine === "kernel" ? "Kernel is reading pages"
+        : data.queries[0] || "Finding relevant sources";
   return (
-    <div className="agent-activity">
+    <div className={`agent-activity ${open ? "open" : ""}`}>
       <button
         type="button"
-        className="progress-strip w-full text-left"
-        onClick={onOpen}
-        aria-label="View research sources"
+        className="activity-line"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
       >
         {active ? (
-          <LoaderCircle size={17} className="spin shrink-0" />
+          <LoaderCircle size={16} className="spin shrink-0" />
         ) : incomplete ? (
-          <Square size={16} />
+          <Square size={14} className="shrink-0" />
         ) : (
-          <Check size={17} className="shrink-0" />
+          <Check size={16} className="shrink-0" />
         )}
-        <span>
-          {label}
-          <small>
-            {data.sources.length
-              ? `${data.sources.length} ${data.sources.length === 1 ? "source" : "sources"}${data.engine ? ` · ${data.engine === "browser_use" ? "Browser Use Cloud" : data.engine === "kernel" ? "Kernel" : "Search API"}` : ""}`
-              : data.engine === "browser_use" ? "Browser Use Cloud is navigating"
-                : data.engine === "kernel" ? "Kernel is reading pages"
-                : data.queries[0] || "Finding relevant sources"}
-            {data.warning ? ` · ${data.warning}` : ""}
-          </small>
+        <span className="activity-label">{label}</span>
+        <span className="activity-detail">
+          {detail}
+          {data.warning ? ` · ${data.warning}` : ""}
         </span>
-        <ChevronRight size={16} className="trailing shrink-0" />
+        <ChevronRight size={15} className="trailing shrink-0" />
       </button>
-      {!!data.steps?.length && (
+      {open && !!data.steps?.length && (
         <ol className="agent-steps" aria-label="Research actions">
           {data.steps.map((step, i) => (
             <li key={i}>
