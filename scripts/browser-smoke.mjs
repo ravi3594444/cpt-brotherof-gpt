@@ -239,6 +239,59 @@ try {
     await context.close();
   }
   {
+    // Only prepared examples have a research trail; small talk just gets the Sample reply.
+    const { context, page, errors } = await open(PHONE);
+    await page.getByRole("textbox").fill("hey");
+    await page.getByRole("textbox").press("Enter");
+    await finished(page);
+    check("in Sample mode, \"hey\" gets a reply and no research panel",
+      /This is sample mode/.test(await page.locator(".answer-body").innerText()) &&
+        (await page.locator(".agent-activity").count()) === 0 && (await page.locator(".source-card").count()) === 0);
+    await page.locator(".followup", { hasText: "How do AI agents search the web?" }).click();
+    await page.waitForFunction(() => document.querySelectorAll(".answer-actions").length === 2, null, { timeout: 20000 }).catch(() => {});
+    await finished(page);
+    const trail = page.locator(".assistant-message").nth(1).locator(".agent-activity");
+    check("  an example question still shows its research trail",
+      (await trail.count()) === 1 && /Sample research complete/.test(await trail.innerText()));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // Live, web on: the model answered without calling the research tool.
+    const context = await browser.newContext({ viewport: PHONE });
+    const page = await context.newPage();
+    await page.route("**/api/config", (route) => route.fulfill({ json: {
+      access: "open", demo: false, modelConnected: true, searchConnected: true, modelName: "Atria Dawn Preview",
+      engines: { browserUse: false, kernel: true, visionAgent: false, tavily: false, jev: false, vision: false },
+    } }));
+    let release;
+    const answered = new Promise((resolve) => { release = resolve; });
+    await page.route("**/api/chat", async (route) => {
+      await answered;
+      await route.fulfill(stream([
+        { type: "start", messageId: "direct-1", messageMetadata: { demo: false } },
+        { type: "text-start", id: "answer" },
+        { type: "text-delta", id: "answer", delta: "Hi! What would you like me to look into?" },
+        { type: "text-end", id: "answer" },
+        { type: "finish", finishReason: "stop" },
+      ]));
+    });
+    await page.goto(BASE, { waitUntil: "networkidle" });
+    await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+    await page.getByRole("textbox").fill("hey");
+    await page.getByRole("textbox").press("Enter");
+    const waiting = await page.locator(".progress-strip").innerText({ timeout: 5000 }).catch(() => "");
+    check("with web on, the live waiting line says Thinking…, not research", /Thinking…/.test(waiting) && !/research/i.test(waiting), waiting);
+    release();
+    await page.waitForSelector(".answer-actions", { timeout: 10000 });
+    const answer = await page.locator(".assistant-message").innerText();
+    check("  a direct answer shows no research panel and no \"Research stopped\"",
+      (await page.locator(".agent-activity").count()) === 0 && !/Research stopped/.test(answer) &&
+        /What would you like me to look into/.test(answer) &&
+        (await page.locator(".answer-stamp").innerText()) === "Scout", answer);
+    await context.close();
+  }
+  {
     // Many sources: every one gets a card in a row that swipes sideways.
     const { context, page, errors } = await open(PHONE);
     const sources = Array.from({ length: 6 }, (_, i) => ({
@@ -481,6 +534,216 @@ try {
       bodies.length === 2 && bodies.every((b) => b.webEnabled === false),
       JSON.stringify(bodies.map((b) => b.webEnabled)));
     check("  the Web chip is still off afterwards", (await webChip(page).getAttribute("aria-pressed")) === "false");
+    await context.close();
+  }
+  {
+    // Desktop: the sidebar folds to an icon rail, like ChatGPT, and this device remembers it.
+    const { context, page, errors } = await open();
+    const measure = () => page.evaluate(() => ({
+      sidebar: document.querySelector(".scout-sidebar")?.getBoundingClientRect().width,
+      main: document.querySelector(".main-shell")?.getBoundingClientRect().width,
+      sideScroll: document.documentElement.scrollWidth > innerWidth,
+      saved: localStorage.getItem("scout.sidebar"),
+      early: document.documentElement.getAttribute("data-scout-sidebar"),
+    }));
+    // The width eases over about 0.2 s.
+    const settle = () => page.waitForTimeout(450);
+    const listShown = () => page.getByText("YOUR CONVERSATIONS").isVisible();
+    const railButton = (name) => page.getByRole("button", { name, exact: true });
+    await chip(page, "AI agents search the web").click();
+    await finished(page);
+    const wide = await measure();
+    await shot(page, "sidebar-expanded");
+    check("the desktop sidebar starts open, 252 px wide, with the conversation list",
+      Math.abs(wide.sidebar - 252) <= 2 && (await listShown()), JSON.stringify(wide));
+
+    const motion = await page.locator(".scout-sidebar").evaluate((el) => getComputedStyle(el).transition);
+    await page.getByRole("button", { name: "Close sidebar" }).click();
+    await settle();
+    const rail = await measure();
+    check("Close sidebar folds it to a slim rail without the conversation list",
+      rail.sidebar <= 72 && !(await listShown()), JSON.stringify(rail));
+    check("  the main area widens, and nothing scrolls sideways",
+      rail.main >= wide.main + 150 && !rail.sideScroll, JSON.stringify({ wide, rail }));
+    check("  the width slides over about 0.2 s", /width 0\.2\d*s/.test(motion), motion);
+    // A click leaves focus alone, so no Open sidebar label pops up away from the pointer.
+    const clickTip = await page.locator('[data-slot="tooltip-content"]', { hasText: "Open sidebar" }).count();
+    check("  a click on Close sidebar shows no label on the rail", clickTip === 0, `${clickTip} open`);
+    const railBox = await page.locator(".sidebar-rail").boundingBox();
+    const offsets = [];
+    for (const name of ["Open sidebar", "New conversation", "Search chats", "Explore a research example", "Workspace settings"]) {
+      const box = await railButton(name).boundingBox().catch(() => null);
+      offsets.push(box && railBox ? Math.round(Math.abs(box.x + box.width / 2 - (railBox.x + railBox.width / 2))) : name);
+    }
+    check("  the rail shows centered icon buttons to open, start, search, explore and settings",
+      offsets.every((offset) => offset === 0 || offset === 1), JSON.stringify(offsets));
+    const background = () => railButton("Search chats").evaluate((el) => getComputedStyle(el).backgroundColor);
+    const resting = await background();
+    await railButton("Search chats").hover();
+    const tip = await page.locator('[data-slot="tooltip-content"]', { hasText: "Search chats" })
+      .waitFor({ timeout: 3000 }).then(() => true, () => false);
+    await page.waitForTimeout(250);
+    const hovered = await background();
+    check("  each shows its name on hover, with a hover highlight", tip && hovered !== resting, `${resting} → ${hovered}`);
+    await page.mouse.move(700, 400, { steps: 5 });
+    await page.waitForTimeout(250);
+    await shot(page, "sidebar-collapsed");
+
+    await railButton("New conversation").click();
+    const fresh = await page.waitForSelector(".suggestion-chip", { timeout: 5000 }).then(() => true, () => false);
+    check("the rail's New conversation opens a fresh conversation",
+      fresh && (await page.locator(".user-message").count()) === 0);
+    await railButton("Search chats").click();
+    const search = await page.getByRole("dialog", { name: "Your conversations" }).waitFor({ timeout: 5000 }).then(() => true, () => false);
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog").waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
+    await railButton("Workspace settings").click();
+    const settings = await page.getByRole("dialog", { name: "Your Scout workspace" }).waitFor({ timeout: 5000 }).then(() => true, () => false);
+    check("  its Search chats and Workspace settings buttons open their panels", search && settings, JSON.stringify({ search, settings }));
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog").waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
+
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+    const reloaded = await measure();
+    check("after a reload the sidebar is still a rail",
+      reloaded.sidebar <= 72 && reloaded.saved === "collapsed" && reloaded.early === null && !(await listShown()), JSON.stringify(reloaded));
+
+    await railButton("Open sidebar").click();
+    await settle();
+    const reopened = await measure();
+    check("Open sidebar brings back the full 252 px sidebar and remembers it",
+      Math.abs(reopened.sidebar - 252) <= 2 && reopened.saved === "expanded" && (await listShown()) && !reopened.sideScroll,
+      JSON.stringify(reopened));
+
+    await page.keyboard.press("Control+b");
+    await settle();
+    const byKey = await measure();
+    await page.keyboard.press("Control+b");
+    await settle();
+    const backByKey = await measure();
+    check("Ctrl+B folds the sidebar and opens it again",
+      byKey.sidebar <= 72 && byKey.saved === "collapsed" && Math.abs(backByKey.sidebar - 252) <= 2 && backByKey.saved === "expanded",
+      JSON.stringify({ byKey, backByKey }));
+
+    // Folding or opening hides the focused button, so focus moves to the button that undoes it.
+    const focused = () => page.evaluate(() => document.activeElement?.getAttribute("aria-label") || document.activeElement?.tagName);
+    const toggleFrom = async (locator, key) => {
+      await locator.focus();
+      await page.keyboard.press(key);
+      await settle();
+      return focused();
+    };
+    const closeButton = page.getByRole("button", { name: "Close sidebar" });
+    const keyed = {
+      fold: await toggleFrom(closeButton, "Control+b"),
+      open: await toggleFrom(railButton("Search chats"), "Control+b"),
+      foldCmd: await toggleFrom(closeButton, "Meta+b"),
+      openCmd: await toggleFrom(railButton("Open sidebar"), "Meta+b"),
+    };
+    check("  with focus in the sidebar, Ctrl+B and Cmd+B move it to the button that undoes the change",
+      keyed.fold === "Open sidebar" && keyed.open === "Close sidebar" && keyed.foldCmd === "Open sidebar" && keyed.openCmd === "Close sidebar",
+      JSON.stringify(keyed));
+    const pressed = { fold: await toggleFrom(closeButton, "Enter"), open: await toggleFrom(railButton("Open sidebar"), "Enter") };
+    check("  and so do the Close sidebar and Open sidebar buttons from the keyboard",
+      pressed.fold === "Open sidebar" && pressed.open === "Close sidebar", JSON.stringify(pressed));
+    await page.getByRole("textbox").fill("Keep this text");
+    await page.keyboard.press("Control+b");
+    await settle();
+    const typing = await page.getByRole("textbox").evaluate((el) => ({ focused: document.activeElement === el, value: el.value }));
+    await page.keyboard.press("Control+b");
+    await settle();
+    check("  Ctrl+B while typing a question keeps the focus and the text",
+      typing.focused && typing.value === "Keep this text", JSON.stringify(typing));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    const { context, page } = await open(undefined, { reducedMotion: "reduce" });
+    await page.getByRole("button", { name: "Close sidebar" }).click();
+    const folded = await page.locator(".scout-sidebar").evaluate((el) => ({
+      width: el.getBoundingClientRect().width,
+      transition: getComputedStyle(el).transitionProperty,
+    }));
+    check("with reduce motion on, the sidebar folds at once, without sliding",
+      folded.width <= 72 && folded.transition === "none", JSON.stringify(folded));
+    await context.close();
+  }
+  {
+    // A saved rail is in place from the first paint, before the app's JavaScript runs.
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    await context.addInitScript(() => {
+      localStorage.setItem("scout.sidebar", "collapsed");
+      window.__sidebarWidths = [];
+      document.addEventListener("DOMContentLoaded", () => {
+        const el = document.querySelector(".scout-sidebar");
+        if (el) new ResizeObserver(() => window.__sidebarWidths.push(el.getBoundingClientRect().width)).observe(el);
+      });
+    });
+    const page = await context.newPage();
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    await page.route(/\/_next\/static\/.+\.js(\?|$)/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.goto(BASE, { waitUntil: "domcontentloaded" });
+    const early = await page.evaluate(() => ({
+      width: document.querySelector(".scout-sidebar")?.getBoundingClientRect().width,
+      list: [...document.querySelectorAll(".sidebar-label")].some((el) => el.checkVisibility()),
+    }));
+    release();
+    await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 10000 }).catch(() => {});
+    const loaded = await page.evaluate(() => ({
+      width: document.querySelector(".scout-sidebar")?.getBoundingClientRect().width,
+      widest: Math.max(0, ...window.__sidebarWidths),
+      early: document.documentElement.getAttribute("data-scout-sidebar"),
+    }));
+    check("a saved rail shows from the first paint, before the app loads", early.width <= 72 && !early.list, JSON.stringify(early));
+    check("  and stays a rail while the app loads, without a flash of the open sidebar",
+      loaded.width <= 72 && loaded.widest <= 72 && loaded.early === null, JSON.stringify(loaded));
+    await context.close();
+  }
+  {
+    // Touch tablets wide enough for the rail get finger-sized buttons to fold and open it.
+    const { context, page } = await open({ width: 800, height: 1280 }, { hasTouch: true });
+    const coarse = await page.evaluate(() => matchMedia("(pointer: coarse)").matches);
+    const box = (name) => page.getByRole("button", { name, exact: true }).boundingBox();
+    const brand = await page.getByRole("button", { name: "Scout home" }).boundingBox();
+    const close = await box("Close sidebar");
+    await page.getByRole("button", { name: "Close sidebar" }).tap();
+    await page.waitForTimeout(450);
+    const reopen = await box("Open sidebar");
+    const finger = (b) => b && b.width >= 42 && b.width <= 48 && b.height >= 42 && b.height <= 48;
+    check("on touch tablets, Close sidebar and Open sidebar are 42 to 48 px touch targets",
+      coarse && finger(close) && finger(reopen), JSON.stringify({ coarse, close, reopen }));
+    check("  Close sidebar stays in line with the brand, inside the sidebar",
+      Math.abs(close.y + close.height / 2 - (brand.y + brand.height / 2)) <= 2 && close.x + close.width <= 252 - 16,
+      JSON.stringify({ brand, close }));
+    await context.close();
+  }
+  {
+    // Phones keep the drawer, even when this device left the desktop sidebar folded.
+    const saved = { cookies: [], origins: [{ origin: new URL(BASE).origin, localStorage: [{ name: "scout.sidebar", value: "collapsed" }] }] };
+    const { context, page, errors } = await open({ width: 390, height: 844 }, { storageState: saved });
+    const railsShown = () => page.locator(".sidebar-rail:visible, .scout-sidebar:visible").count();
+    check("on phones no rail shows", (await railsShown()) === 0);
+    const menu = page.locator(".mobile-menu");
+    const menuBox = await menu.boundingBox();
+    await menu.click();
+    const drawer = page.locator('[data-mobile="true"]');
+    const opened = await drawer.waitFor({ timeout: 5000 }).then(() => true, () => false);
+    await page.waitForTimeout(600); // the drawer slides in
+    await shot(page, "sidebar-phone");
+    check("  the menu button opens the full drawer, with a 42 px touch target",
+      opened && (await drawer.getByText("YOUR CONVERSATIONS").isVisible()) && (await railsShown()) === 0 &&
+        menuBox?.width >= 42 && menuBox?.height >= 42,
+      JSON.stringify(menuBox));
+    check("  the drawer has no desktop Close sidebar button", (await page.getByRole("button", { name: "Close sidebar" }).count()) === 0);
+    await drawer.getByRole("button", { name: /New conversation/ }).click();
+    check("  an action in the drawer closes it", await drawer.waitFor({ state: "hidden", timeout: 5000 }).then(() => true, () => false));
+    check("  nothing scrolls sideways", !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
     await context.close();
   }
   for (const [width, height] of [[1280, 720], [1366, 640], [1280, 800], [412, 915], [360, 640]]) {
