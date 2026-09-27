@@ -1,6 +1,6 @@
 # Scout context
 
-Scout is a mobile-first research chat. It answers a question from public web pages that a research engine visited, and shows the sources, citations, and the steps it took, so the reader can check the answer.
+Scout is a mobile-first research chat. When a question needs the web, it answers from public web pages that a research engine visited, and shows the sources, citations, and the steps it took, so the reader can check the answer. Other messages get a plain reply.
 
 ## Terms
 
@@ -9,8 +9,9 @@ Scout is a mobile-first research chat. It answers a question from public web pag
 | Question | The latest user message Scout is answering, 1 to 6000 characters. | prompt, query |
 | Conversation | A user's questions and Scout's answers, kept on the device. | thread, chat (in UI copy) |
 | Answer | Scout's reply to a Question, written by the Answer model. | response, completion |
-| Answer model | The OpenAI-compatible model that writes Answers from Evidence. Shown as "AI model". | LLM, JEV |
-| Research | Gathering Sources for a Question with a Research engine before the Answer is written. | search (when a browser does it) |
+| Answer model | The OpenAI-compatible model that writes Answers, and decides whether a Question needs Research by calling the Research tool. Shown as "AI model". | LLM, JEV |
+| Research | Gathering Sources with a Research engine for the task the Answer model gave the Research tool, before the Answer is written. | search (when a browser does it) |
+| Research tool | The `web_research` tool the Answer model calls when a Question needs Research. The Answer model decides; Scout has no rules of its own for it. | search tool, auto-research |
 | Research engine | The service that gathers Sources: Browser Use Cloud, Kernel, or the Search API. | browser (for the Search API) |
 | Auto | The Research engine setting that lets Scout choose the engine. | default engine |
 | Browser Use Cloud | A hosted browser agent that navigates sites and returns page summaries. | Browser Use session (for Kernel) |
@@ -26,11 +27,11 @@ Scout is a mobile-first research chat. It answers a question from public web pag
 | Research steps | The visible log of actions the server actually took. They are not the model's reasoning. | thoughts, chain of thought |
 | Sample mode | Prepared Answers and Sources that show the interface. It never browses or calls a model. | demo mode, preview |
 | Live chat | The Answer model with Search the web off or no Research engine connected. It gives no Citations. | chat mode |
-| Search the web | The composer switch that decides whether Research runs before the Answer. | web mode |
+| Search the web | The composer switch that gives the Answer model the Research tool. Off means no tool, so no Research. | web mode |
 | Workspace | One Scout deployment and the server keys it has connected. | account, project |
 | Access code | An optional secret the Workspace owner sets; Scout asks for it once per device before anyone can use the Workspace's keys. | password, login |
 | Source card | A tile for one Source in the sideways row under an Answer, with the page's picture if it has one. | preview card |
-| Photo | A JPEG, PNG, or WebP picture the user attaches to a Question, up to 4. Only the Answer model sees it; Research uses the typed words. | image upload, attachment |
+| Photo | A JPEG, PNG, or WebP picture the user attaches to a Question, up to 4. Only the Answer model sees it; Research uses the words of the Research tool's task. | image upload, attachment |
 | Suggestion chip | A suggested first Question on the home screen. | prompt card |
 | Behind the answer | The panel listing every Source of an Answer with its content. | reader, source drawer |
 | Follow-up suggestion | A suggested next Question shown after a Sample mode Answer. | prompt chip |
@@ -40,13 +41,15 @@ Scout is a mobile-first research chat. It answers a question from public web pag
 
 - A **Conversation** holds Questions and Answers in order.
 - An **Answer** has at most one **Research** record: its phase, **Research steps**, **Sources**, engine, and any warning.
+- With **Search the web** on, the **Answer model** has the **Research tool** and calls it at most once per **Question**, only when the Question needs Research. An Answer it writes without the tool has no Research record and no **Citations**.
+- When the provider cannot take tools, the **Answer model** makes the same choice as a one-word reply (RESEARCH or ANSWER); an unclear reply means Research.
 - A **Citation** number n refers to the n-th **Source** of the same Answer's Research.
 - **Auto** asks **JEV** only when Browser Use Cloud, Kernel, and the JEV key are all connected. With one browser connected, Auto uses it. With none, it uses the **Search API**.
 - **Browser Use Cloud** Sources are never **Read**; **Kernel** page text is Read; **Search API** Sources are Read only after page extraction succeeds.
 
 ## States and lifecycles
 
-- **Research phase**: searching → reading → writing → complete. It shows "Research stopped" if the request ends before complete.
+- **Research phase**: searching → reading → writing → complete. It shows "Research stopped" if the request ends before complete, or if Research fails; the Answer model then says it failed.
 - **Browser Use Cloud run**: queued → dispatching → running → completed, failed, or cancelled.
 - **Sample mode**: on until a Research engine is connected; the Sample switch overrides it for the current Conversation.
 

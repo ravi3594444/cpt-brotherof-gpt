@@ -77,6 +77,18 @@ export function withPhotoDescription(messages: ModelMessage[], description: stri
   });
 }
 
+/** The same turns as text only, for side calls such as planning that never need the photos. */
+export function textOnlyMessages(messages: ModelMessage[]): ModelMessage[] {
+  return messages
+    .map((m) => ({
+      role: m.role,
+      content: typeof m.content === "string"
+        ? m.content
+        : m.content.map((p) => (p.type === "text" ? p.text : "")).join(""),
+    }) as ModelMessage)
+    .filter((m) => m.content);
+}
+
 /** What the browser sends: text for every recent turn, photos only for the latest photo question. */
 export function requestTurns<T extends { id: string; role: string; parts: ChatPart[] }>(messages: T[]) {
   const recent = messages.slice(-16);

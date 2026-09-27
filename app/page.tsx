@@ -761,7 +761,7 @@ function ChatWorkspace({
           name: "research_question",
           title: "Research a question",
           description:
-            "Submit a question to Scout. Starts visible web research and returns the completed answer with sources; sample responses when demo mode is enabled.",
+            "Submit a question to Scout. Scout researches the web with visible steps when the question needs it, and returns the completed answer with any sources; sample responses when demo mode is enabled.",
           inputSchema: {
             type: "object",
             properties: {
@@ -911,7 +911,7 @@ function ChatWorkspace({
           status={status}
           onStop={() => {
             void stop();
-            toast("Research stopped");
+            toast("Stopped");
           }}
         />
       </PromptInputFooter>
@@ -1100,11 +1100,7 @@ function ChatWorkspace({
                 {status === "submitted" && (
                   <div className="progress-strip">
                     <LoaderCircle size={17} className="spin" />
-                    {preview || config.demo
-                      ? "Opening a sample answer…"
-                      : webEnabled
-                        ? "Starting your research…"
-                        : "Thinking…"}
+                    {preview || config.demo ? "Opening a sample answer…" : "Thinking…"}
                   </div>
                 )}
                 {error && (

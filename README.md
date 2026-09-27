@@ -40,6 +40,13 @@ Put these values in the host's secret environment, not in the app bundle:
 | `SCOUT_ACCESS_CODE` | Optional. When set, the app and API ask for this code, so strangers who find the site cannot spend your credit |
 
 For live research, connect the model plus Browser Use **or** Kernel. With
+the Web chip on, the answer model gets a `web_research` tool and decides for
+itself when to use it: when you ask it to research, find, look up, compare or
+check something, or when a good answer needs current facts. A greeting,
+writing, math or code gets a direct reply with no research and no citations.
+The answer model should support OpenAI-style tool calling. If the provider
+rejects tools, Scout asks the model in plain text whether to research (one
+word, RESEARCH or ANSWER) and then researches or answers directly. With
 Kernel and a vision model connected, the **Vision agent** engine lets the vision
 model drive a real Kernel browser (open, click, type into search boxes, scroll,
 read) for up to 8 steps while the answer model only writes the reply. JEV can
@@ -86,12 +93,13 @@ pnpm install
 pnpm dev
 pnpm exec tsc --noEmit
 pnpm lint
-pnpm test          # unit tests for research, engine choice, links, and samples
+pnpm test          # unit tests for the answer loop, research, engine choice, links, and samples
 pnpm build
 ```
 
 With `pnpm dev` running, `pnpm test:browser` drives sample mode in Chromium:
-the logo intro, the home screen, answers, citations, a six-source card row,
+the logo intro, the home screen, answers, citations, small talk without a
+research trail, a direct live answer, a six-source card row,
 photos (attach, limit, shrink, thumbnails), history, Try again, the + menu and
 Web chip, a stubbed connected workspace, and the layout at desktop and phone
 sizes. It needs no

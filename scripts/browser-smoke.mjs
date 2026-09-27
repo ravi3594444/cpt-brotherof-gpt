@@ -239,6 +239,59 @@ try {
     await context.close();
   }
   {
+    // Only prepared examples have a research trail; small talk just gets the Sample reply.
+    const { context, page, errors } = await open(PHONE);
+    await page.getByRole("textbox").fill("hey");
+    await page.getByRole("textbox").press("Enter");
+    await finished(page);
+    check("in Sample mode, \"hey\" gets a reply and no research panel",
+      /This is sample mode/.test(await page.locator(".answer-body").innerText()) &&
+        (await page.locator(".agent-activity").count()) === 0 && (await page.locator(".source-card").count()) === 0);
+    await page.locator(".followup", { hasText: "How do AI agents search the web?" }).click();
+    await page.waitForFunction(() => document.querySelectorAll(".answer-actions").length === 2, null, { timeout: 20000 }).catch(() => {});
+    await finished(page);
+    const trail = page.locator(".assistant-message").nth(1).locator(".agent-activity");
+    check("  an example question still shows its research trail",
+      (await trail.count()) === 1 && /Sample research complete/.test(await trail.innerText()));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // Live, web on: the model answered without calling the research tool.
+    const context = await browser.newContext({ viewport: PHONE });
+    const page = await context.newPage();
+    await page.route("**/api/config", (route) => route.fulfill({ json: {
+      access: "open", demo: false, modelConnected: true, searchConnected: true, modelName: "Atria Dawn Preview",
+      engines: { browserUse: false, kernel: true, visionAgent: false, tavily: false, jev: false, vision: false },
+    } }));
+    let release;
+    const answered = new Promise((resolve) => { release = resolve; });
+    await page.route("**/api/chat", async (route) => {
+      await answered;
+      await route.fulfill(stream([
+        { type: "start", messageId: "direct-1", messageMetadata: { demo: false } },
+        { type: "text-start", id: "answer" },
+        { type: "text-delta", id: "answer", delta: "Hi! What would you like me to look into?" },
+        { type: "text-end", id: "answer" },
+        { type: "finish", finishReason: "stop" },
+      ]));
+    });
+    await page.goto(BASE, { waitUntil: "networkidle" });
+    await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+    await page.getByRole("textbox").fill("hey");
+    await page.getByRole("textbox").press("Enter");
+    const waiting = await page.locator(".progress-strip").innerText({ timeout: 5000 }).catch(() => "");
+    check("with web on, the live waiting line says Thinking…, not research", /Thinking…/.test(waiting) && !/research/i.test(waiting), waiting);
+    release();
+    await page.waitForSelector(".answer-actions", { timeout: 10000 });
+    const answer = await page.locator(".assistant-message").innerText();
+    check("  a direct answer shows no research panel and no \"Research stopped\"",
+      (await page.locator(".agent-activity").count()) === 0 && !/Research stopped/.test(answer) &&
+        /What would you like me to look into/.test(answer) &&
+        (await page.locator(".answer-stamp").innerText()) === "Scout", answer);
+    await context.close();
+  }
+  {
     // Many sources: every one gets a card in a row that swipes sideways.
     const { context, page, errors } = await open(PHONE);
     const sources = Array.from({ length: 6 }, (_, i) => ({
