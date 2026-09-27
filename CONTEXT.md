@@ -26,7 +26,8 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 | Read | True for a Source only when its content is page text a Research engine read directly. Search excerpts and browser-agent summaries are not Read. | verified |
 | Evidence | The Sources given to the Answer model, marked as page content, search excerpt, or agent observation, with the Research engine's warning, such as a Partial result's. | context |
 | Citation | A numbered link in an Answer, like [1](url), that points to one of the Question's Sources. | footnote, reference |
-| Research steps | The visible log of actions the server actually took. They are not the model's reasoning. | thoughts, chain of thought |
+| Research steps | The visible log of actions the server actually took. They are not the model's reasoning; that is Thinking. | thoughts, chain of thought |
+| Thinking | The Answer model's own reasoning before it writes, as its provider returns it (or a leading `<think>` block in its text). Shown as one collapsed row, "Thinking…" then "Thought for N s", that opens to plain text. Not Research steps, which stay the server's actions. | chain of thought, reasoning (in UI copy) |
 | Sample mode | Prepared Answers and Sources that show the interface. It never browses or calls a model. | demo mode, preview |
 | Live chat | The Answer model with Search the web off or no Research engine connected. It gives no Citations. | chat mode |
 | Search the web | The composer switch that gives the Answer model the Research tool. Off means no tool, so no Research. | web mode |
@@ -46,6 +47,7 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 - With **Search the web** on, the **Answer model** has the **Research tool** and calls it once per **Question**, only when the Question needs Research. It may call it once more only when that Research failed or found no Sources, at least 90 seconds of the ceiling remain, and the failure would not repeat (a rejected key, no credit, a rate limit, or a Browser Use Cloud run that may still be going); a third call never runs. An Answer it writes without the tool has no Research record and no **Citations**.
 - When the provider cannot take tools, the **Answer model** makes the same choice as a one-word reply (RESEARCH or ANSWER); an unclear reply means Research.
 - A **Citation** number n refers to the n-th **Source** of the same Answer's Research.
+- An **Answer** can have **Thinking** from before and after the Research tool call; it shows as one row, above the Research panel when the model thought before researching. Thinking is kept on the device, up to 20,000 characters per Answer (older Conversations give theirs up first when the device runs out of room), and never sent back to the **Answer model**.
 - **Auto** asks **JEV** only when Browser Use Cloud, Kernel, and the JEV key are all connected. With one browser connected, Auto uses it. With none, it uses the **Search API**.
 - **Browser Use Cloud** Sources, including **Partial results**, are never **Read**; **Kernel** page text is Read; **Search API** Sources are Read only after page extraction succeeds.
 
@@ -54,6 +56,7 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 - **Research phase**: searching → reading → writing → complete. When Research fails and the Answer model is told why, it shows "Research incomplete" with the reason from then on, also while the Answer model decides whether to try again, and the Answer model says what happened. It shows "Research stopped" if the request is cut off or cancelled before complete.
 - **Browser Use Cloud run**: queued → dispatching → running → completed, failed, or cancelled. Scout polls its status until the **Research budget** ends, then keeps the pages the agent reached as **Partial results** and cancels the run. After every run Scout stops its cloud browser.
 - **Sample mode**: on until a Research engine is connected; the Sample switch overrides it for the current Conversation.
+- **Thinking**: "Thinking…" with a live seconds count while a thought streams → "Thought for N s" when done. It shows "Thinking stopped" if the Answer ends mid-thought. Before the first part of an Answer arrives, the waiting line says "Thinking…" and adds the seconds after 3.
 
 ## Ambiguities
 

@@ -66,7 +66,14 @@ model drive a real Kernel browser (open, click, type into search boxes, scroll,
 read) for up to 8 steps while the answer model only writes the reply. JEV can
 choose it in Auto. For Atria Dawn Preview, use `MODEL_BASE_URL=https://api.atria-asi.ai/v1`
 and `MODEL_ID=Atria-Dawn-Preview`; Atria reads text only, so set a vision model
-for photos. The two
+for photos. Atria is a reasoning model: it thinks before its first word. Scout
+shows that thinking as a collapsed "Thinking…" row above the answer, and lets
+each answer use up to 16,000 output tokens, since thinking counts against the
+limit on most providers (Atria accepts up to 65,536). A model whose output cap
+is lower, which turns 16,000 away, gets the answer with 4,096. For a self-hosted
+reasoning model whose chat template opens the `<think>` block itself (DeepSeek
+R1 or QwQ on vLLM or SGLang), start the server with its reasoning parser so the
+thinking arrives as `reasoning_content`; otherwise it shows in the answer. The two
 browser keys together enable engine choice in the chat. JEV is optional and
 only selects the path in Auto mode. It does not browse, answer, or run locally
 on Android. The current private preview already has its answer model
@@ -118,9 +125,9 @@ pnpm build
 
 With `pnpm dev` running, `pnpm test:browser` drives sample mode in Chromium:
 the logo intro, the home screen, answers, citations, small talk without a
-research trail, a direct live answer, stubbed research that ends
-"Research incomplete" (once, and after a retry) and one with partial
-results, a six-source card row,
+research trail, a direct live answer, a live answer's Thinking row, stubbed
+research that ends "Research incomplete" (once, and after a retry) and one
+with partial results, a six-source card row,
 photos (attach, limit, shrink, thumbnails), history, Try again, the + menu and
 Web chip, a stubbed connected workspace, and the layout at desktop and phone
 sizes. It needs no

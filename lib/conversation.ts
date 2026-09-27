@@ -100,6 +100,40 @@ export function requestTurns<T extends { id: string; role: string; parts: ChatPa
   }));
 }
 
+// Thinking saved per answer, in characters. Requests never carry it (see requestTurns).
+export const MAX_SAVED_THINKING = 20_000;
+
+/** A message as saved on the device, with its thinking cut to MAX_SAVED_THINKING characters in all. */
+export function capThinking<T extends { parts: ChatPart[] }>(message: T): T {
+  let room = MAX_SAVED_THINKING;
+  let cut = false;
+  const parts = message.parts.map((p) => {
+    if (p.type !== "reasoning") return p;
+    const text = p.text || "";
+    if (text.length <= room) {
+      room -= text.length;
+      return p;
+    }
+    cut = true;
+    const kept = room > 0 ? `${text.slice(0, room - 1)}…` : "";
+    room = 0;
+    return { ...p, text: kept };
+  });
+  return cut ? { ...message, parts } : message;
+}
+
+/** Saved conversations for a device out of room: every one but the newest gives up its thinking. */
+export function withoutOlderThinking<T extends { messages: { parts: ChatPart[] }[] }>(threads: T[]): T[] {
+  return threads.map((thread, i) =>
+    !i || !thread.messages.some((m) => m.parts.some((p) => p.type === "reasoning"))
+      ? thread
+      : {
+        ...thread,
+        messages: thread.messages.map((m) => ({ ...m, parts: m.parts.filter((p) => p.type !== "reasoning") })),
+      },
+  );
+}
+
 /** The message shown when the answer model fails for a reason Scout did not name itself. */
 export function answerErrorMessage({ photos, aborted }: { photos: number; aborted: boolean }) {
   if (aborted) return "Research stopped or timed out. Please try again.";

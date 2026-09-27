@@ -6,7 +6,9 @@ import {
   streamText,
   tool,
   UnsupportedFunctionalityError,
+  wrapLanguageModel,
   type LanguageModel,
+  type LanguageModelMiddleware,
   type ModelMessage,
   type UIMessageStreamWriter,
 } from "ai";
@@ -123,11 +125,131 @@ export function toolsRejected(error: unknown): boolean {
   return /tool|function/i.test(text) && !NOT_ABOUT_TOOLS.test(text);
 }
 
+// Reasoning tokens count against the answer's output limit on most providers.
+const ANSWER_TOKENS = 16000;
+// For a model whose output cap is below ANSWER_TOKENS: a limit nearly every model accepts.
+const SMALL_ANSWER_TOKENS = 4096;
+const NAMES_OUTPUT_LIMIT = /max_tokens|max_completion_tokens|max_output_tokens|completion tokens|output tokens|in the completion/i;
+
+/** True when a provider turned the request away because the answer's output limit is too high for it. */
+export function outputLimitRejected(error: unknown): boolean {
+  const cause = RetryError.isInstance(error) ? error.lastError : error;
+  if (!APICallError.isInstance(cause) || ![400, 422].includes(cause.statusCode ?? 0)) return false;
+  return NAMES_OUTPUT_LIMIT.test(`${cause.message} ${cause.responseBody ?? ""}`);
+}
+
 /** The Answer model's one-word decision, after any thinking: Research unless its first word is ANSWER. */
 export function wantsResearch(reply: string): boolean {
   const decision = reply.replace(/^\s*<(think(?:ing)?)>[\s\S]*?(?:<\/\1>|$)/i, "");
   return decision.match(/[A-Za-z]+/)?.[0].toUpperCase() !== "ANSWER";
 }
+
+const THINK_TAGS = ["<think>", "<thinking>"];
+const OPEN_THINK = /^<(think(?:ing)?)>/i;
+
+/** How many characters at the end of text could start tag, in any case. */
+function partialTag(text: string, tag: string) {
+  for (let n = Math.min(tag.length - 1, text.length); n > 0; n--) if (text.slice(-n).toLowerCase() === tag.slice(0, n)) return n;
+  return 0;
+}
+
+/**
+ * For providers that write their thinking inline: <think> blocks that open a step's text become
+ * reasoning, in any case and even with their tags split across chunks. A think tag later in the
+ * answer stays in the answer.
+ */
+const inlineThinking: LanguageModelMiddleware = {
+  specificationVersion: "v4",
+  wrapStream: async ({ doStream }) => {
+    const { stream, ...rest } = await doStream();
+    type Part = typeof stream extends ReadableStream<infer P> ? P : never;
+    type Text = {
+      start: Part;
+      mode: "undecided" | "thinking" | "text";
+      buffer: string;
+      close: string;
+      thought: string;
+      thoughts: number;
+      started: boolean;
+    };
+    const texts = new Map<string, Text>();
+    return {
+      ...rest,
+      stream: stream.pipeThrough(
+        new TransformStream<Part, Part>({
+          transform(part, controller) {
+            const start = (t: Text) => {
+              if (!t.started) controller.enqueue(t.start);
+              t.started = true;
+            };
+            const text = (id: string, t: Text, delta: string) => {
+              if (!delta) return;
+              start(t);
+              controller.enqueue({ type: "text-delta", id, delta });
+            };
+            const think = (t: Text, delta: string) => {
+              if (delta) controller.enqueue({ type: "reasoning-delta", id: t.thought, delta });
+            };
+            if (part.type === "text-start") {
+              texts.set(part.id, {
+                start: part, mode: "undecided", buffer: "", close: "", thought: "", thoughts: 0, started: false,
+              });
+              return;
+            }
+            const t = part.type === "text-delta" || part.type === "text-end" ? texts.get(part.id) : undefined;
+            if (!t) return controller.enqueue(part);
+            if (part.type === "text-end") {
+              if (t.mode === "thinking") {
+                think(t, t.buffer);
+                controller.enqueue({ type: "reasoning-end", id: t.thought });
+              } else text(part.id, t, t.buffer);
+              texts.delete(part.id);
+              if (t.started) controller.enqueue(part);
+              return;
+            }
+            if (part.type !== "text-delta") return;
+            if (t.mode === "text") {
+              start(t);
+              return controller.enqueue(part);
+            }
+            t.buffer += part.delta;
+            for (;;) {
+              if (t.mode === "undecided") {
+                const lead = t.buffer.trimStart();
+                const open = OPEN_THINK.exec(lead);
+                if (!open) {
+                  // Wait while the text so far could still open a think block.
+                  if (!lead || THINK_TAGS.some((tag) => tag.startsWith(lead.toLowerCase()))) return;
+                  t.mode = "text";
+                  text(part.id, t, t.buffer);
+                  t.buffer = "";
+                  return;
+                }
+                t.mode = "thinking";
+                t.close = `</${open[1].toLowerCase()}>`;
+                t.thought = `${part.id}-think-${++t.thoughts}`;
+                t.buffer = lead.slice(open[0].length);
+                controller.enqueue({ type: "reasoning-start", id: t.thought });
+              }
+              const end = t.buffer.search(new RegExp(t.close, "i"));
+              if (end < 0) {
+                const keep = partialTag(t.buffer, t.close);
+                think(t, t.buffer.slice(0, t.buffer.length - keep));
+                t.buffer = t.buffer.slice(t.buffer.length - keep);
+                return;
+              }
+              think(t, t.buffer.slice(0, end));
+              controller.enqueue({ type: "reasoning-end", id: t.thought });
+              // Another think block may follow before the answer.
+              t.buffer = t.buffer.slice(end + t.close.length);
+              t.mode = "undecided";
+            }
+          },
+        }),
+      ),
+    };
+  },
+};
 
 /** Asks the Answer model in plain text whether to research, for a provider that cannot take tools. */
 async function decideResearch(model: LanguageModel, messages: ModelMessage[], signal: AbortSignal) {
@@ -148,9 +270,15 @@ async function decideResearch(model: LanguageModel, messages: ModelMessage[], si
   }
 }
 
-/** Streams one Answer into the "answer" text part. Research parts are written only if Research runs. */
+/**
+ * Streams one Answer into the "answer" text part, and the Answer model's thinking into reasoning parts.
+ * Research parts are written only if Research runs.
+ */
 export async function streamAnswer(options: AnswerOptions): Promise<void> {
-  const { model, messages, writer, signal, modelName } = options;
+  const { messages, writer, signal, modelName } = options;
+  const model = typeof options.model === "string"
+    ? options.model
+    : wrapLanguageModel({ model: options.model, middleware: inlineThinking });
 
   let data: ResearchData | undefined;
   let researched = false;
@@ -248,12 +376,32 @@ export async function streamAnswer(options: AnswerOptions): Promise<void> {
     written += gap + text;
     writer.write({ type: "text-delta", id: "answer", delta: gap + text });
   };
+  // Each thought, from any step, gets its own reasoning part; the message keeps their total time.
+  let thoughts = 0;
+  let thinkingMs = 0;
+  // A thought's part starts at its first visible character, so an empty thought never shows.
+  const thinking = new Map<string, { id?: string; since: number }>();
+  const thought = (key: string) => {
+    let open = thinking.get(key);
+    if (!open) thinking.set(key, (open = { since: Date.now() }));
+    return open;
+  };
+  const endThought = (key: string) => {
+    const open = thinking.get(key);
+    thinking.delete(key);
+    if (!open?.id) return;
+    thinkingMs += Date.now() - open.since;
+    // Before the part ends, so a finished thought always has its time.
+    writer.write({ type: "message-metadata", messageMetadata: { thinkingMs } });
+    writer.write({ type: "reasoning-end", id: open.id });
+  };
+  let maxOutputTokens = ANSWER_TOKENS;
   const run = async (system: string, withTools: boolean) => {
     const result = streamText({
       model,
       system,
       messages,
-      maxOutputTokens: 2800,
+      maxOutputTokens,
       maxRetries: 1,
       abortSignal: signal,
       ...(withTools && {
@@ -279,23 +427,52 @@ export async function streamAnswer(options: AnswerOptions): Promise<void> {
           return { toolChoice: "none" as const };
         },
       }),
-      // Log provider errors as streamText does by default, except the one the fallback handles.
+      // Log provider errors as streamText does by default, except the ones Scout handles.
       onError: ({ error }) => {
-        if (!toolsRejected(error)) console.error(error);
+        if (!toolsRejected(error) && !(outputLimitRejected(error) && maxOutputTokens > SMALL_ANSWER_TOKENS))
+          console.error(error);
       },
     });
     let stepText = 0;
+    let lead = "";
     for await (const part of result.fullStream) {
       if (part.type === "start-step") {
         newStep = true;
         stepText = 0;
+        lead = "";
       } else if (part.type === "text-delta" && part.text) {
         signal.throwIfAborted();
         modelOutput = true;
-        writeText(part.text);
-        stepText += part.text.length;
+        let text = part.text;
+        if (!stepText) {
+          // A step's text starts at its first visible line, as after a think block, and keeps an indent
+          // that means something in Markdown.
+          lead += text;
+          const first = lead.search(/\S/);
+          if (first < 0) continue;
+          text = lead.slice(lead.lastIndexOf("\n", first) + 1).replace(/^ {1,3}(?=\S)/, "");
+          lead = "";
+        }
+        writeText(text);
+        stepText += text.length;
+      } else if (part.type === "reasoning-start") {
+        thought(part.id);
+      } else if (part.type === "reasoning-delta" && part.text) {
+        signal.throwIfAborted();
+        const open = thought(part.id);
+        const delta = open.id ? part.text : part.text.trimStart();
+        if (!delta) continue;
+        if (!open.id) {
+          open.id = `thinking-${++thoughts}`;
+          writer.write({ type: "reasoning-start", id: open.id });
+        }
+        writer.write({ type: "reasoning-delta", id: open.id, delta });
+      } else if (part.type === "reasoning-end") {
+        endThought(part.id);
       } else if (part.type === "tool-call" || part.type === "finish-step") {
         modelOutput = true;
+        // A thought the provider left open ends with its step.
+        if (part.type === "finish-step") for (const key of [...thinking.keys()]) endThought(key);
       } else if (part.type === "error") {
         throw part.error;
       }
@@ -303,17 +480,27 @@ export async function streamAnswer(options: AnswerOptions): Promise<void> {
     signal.throwIfAborted();
     return { reason: await result.finishReason, stepText };
   };
+  // A model whose output cap is lower turns every request away, so it gets one more try with less room.
+  const answerRun = async (system: string, withTools: boolean) => {
+    try {
+      return await run(system, withTools);
+    } catch (error) {
+      if (modelOutput || maxOutputTokens <= SMALL_ANSWER_TOKENS || !outputLimitRejected(error)) throw error;
+      maxOutputTokens = SMALL_ANSWER_TOKENS;
+      return run(system, withTools);
+    }
+  };
 
   let outcome: Awaited<ReturnType<typeof run>>;
-  if (!options.webEnabled) outcome = await run(answerSystemPrompt("web-off", options), false);
+  if (!options.webEnabled) outcome = await answerRun(answerSystemPrompt("web-off", options), false);
   else {
     try {
-      outcome = await run(answerSystemPrompt("tool", options), true);
+      outcome = await answerRun(answerSystemPrompt("tool", options), true);
     } catch (error) {
       if (modelOutput || !toolsRejected(error)) throw error;
       // The provider cannot take tools, so the Answer model decides in plain text instead.
       const evidence = (await decideResearch(model, messages, signal)) ? await runResearch(options.question, false) : undefined;
-      outcome = await run(
+      outcome = await answerRun(
         evidence ? answerSystemPrompt("evidence", options, evidence) : answerSystemPrompt("direct", options),
         false,
       );
@@ -321,7 +508,11 @@ export async function streamAnswer(options: AnswerOptions): Promise<void> {
   }
   // Surface a provider error instead of marking an empty response successful.
   if (outcome.reason === "error" || outcome.stepText === 0)
-    throw new ResearchError("The model could not complete the answer. Check your provider connection and try again.");
+    throw new ResearchError(
+      outcome.reason === "length"
+        ? "The AI model ran out of room while thinking. Try again, or ask a narrower question."
+        : "The model could not complete the answer. Check your provider connection and try again.",
+    );
   writer.write({ type: "text-end", id: "answer" });
   if (researched) update({ phase: "complete" });
   writer.write({ type: "finish", finishReason: outcome.reason });
