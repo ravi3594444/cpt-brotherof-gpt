@@ -1,6 +1,6 @@
 import type { ResearchSource } from "./chat-types";
 import { jsonIn, jsonResponse, kernelBase } from "./cloud-research.ts";
-import { extractPublicUrls, publicUrl, ResearchError } from "./research.ts";
+import { extractPublicUrls, isSearchPage, publicUrl, ResearchError } from "./research.ts";
 import { imageContent, visionChat, type VisionService } from "./vision.ts";
 
 // The vision agent: a model that can see (the vision helper, e.g. DeepSeek
@@ -184,9 +184,6 @@ function observation(value: unknown): PageObservation {
   };
 }
 
-const isSearchPage = (url: string) =>
-  /(^|\.)(bing\.com|google\.[a-z.]+|duckduckgo\.com)$/.test(new URL(url).hostname);
-
 function describe(action: AgentAction, page: PageObservation) {
   const label = (id: number) => page.elements.find((e) => e.id === id)?.label || `element ${id}`;
   switch (action.action) {
@@ -239,10 +236,15 @@ export async function visionAgentResearch(
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
-  // Fits Vercel's 5-minute function limit with time left to write the answer.
-  { maxSteps = 8, budgetMs = 200_000 }: { maxSteps?: number; budgetMs?: number } = {},
+  // Fits Vercel's 5-minute function limit with time left to write the answer;
+  // the research deadline (epoch ms) ends it sooner when that comes first.
+  { maxSteps = 8, budgetMs = 200_000, deadline = Infinity, clock = Date.now }:
+    { maxSteps?: number; budgetMs?: number; deadline?: number; clock?: () => number } = {},
 ): Promise<{ sources: ResearchSource[]; warning?: string }> {
-  const startedAt = Date.now();
+  const startedAt = clock();
+  const end = Math.min(startedAt + budgetMs, deadline);
+  // Requests end then too, so a slow page or model cannot hold research past it.
+  const budget = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, end - startedAt))]);
   const headers = { Authorization: `Bearer ${keys.kernelKey}`, "Content-Type": "application/json" };
   const session = await jsonResponse<{ session_id?: string }>(
     await fetcher(kernelBase, {
@@ -259,20 +261,20 @@ export async function visionAgentResearch(
       await fetcher(`${kernelBase}/${id}/playwright/execute`, {
         method: "POST", headers,
         body: JSON.stringify({ code: stepScript(input), timeout_sec: 40 }),
-        signal: AbortSignal.any([signal, AbortSignal.timeout(50000)]),
+        signal: AbortSignal.any([budget, AbortSignal.timeout(50000)]),
       }),
       "Kernel",
     );
     if (!result.success) throw new ResearchError("The browser could not carry out that step. Try again or choose another engine.");
     return observation(result.result);
   };
+  const kept = new Map<string, ResearchSource>();
   try {
     const direct = extractPublicUrls(question)[0];
     let page = await step({
       start: direct || `https://www.bing.com/search?q=${encodeURIComponent(question.slice(0, 300))}`,
     });
     progress?.(direct ? "Vision agent opened the supplied page" : "Vision agent searched the web");
-    const kept = new Map<string, ResearchSource>();
     const keep = (p: PageObservation) => {
       const url = publicUrl(p.url);
       if (!url || isSearchPage(url) || !p.text.trim()) return false;
@@ -288,9 +290,9 @@ export async function visionAgentResearch(
     };
     const history: string[] = [];
     let finished = false;
-    for (let n = 1; n <= maxSteps && Date.now() - startedAt < budgetMs; n++) {
+    for (let n = 1; n <= maxSteps && clock() < end; n++) {
       signal.throwIfAborted();
-      const reply = await visionChat(keys.vision, prompt(question, page, n, maxSteps, history, [...kept.values()].map((s) => s.title)), signal, fetcher, 300);
+      const reply = await visionChat(keys.vision, prompt(question, page, n, maxSteps, history, [...kept.values()].map((s) => s.title)), budget, fetcher, 300);
       const action = parseAgentAction(reply, page);
       if (!action) {
         history.push("(a reply that was not an allowed action)");
@@ -315,7 +317,15 @@ export async function visionAgentResearch(
     const sources = [...kept.values()].slice(0, 6);
     if (!sources.length)
       throw new ResearchError("The vision agent did not reach a readable public page. Try a narrower question.");
-    return { sources, ...(finished ? {} : { warning: "Vision agent reached its step limit" }) };
+    return {
+      sources,
+      ...(finished ? {} : { warning: clock() >= end ? "Vision agent ran out of time" : "Vision agent reached its step limit" }),
+    };
+  } catch (error) {
+    // Out of time mid-step: the pages it already read still count.
+    if (signal.aborted || !budget.aborted) throw error;
+    if (!kept.size) throw new ResearchError("The vision agent ran out of time before it read a page. Try a narrower question.");
+    return { sources: [...kept.values()].slice(0, 6), warning: "Vision agent ran out of time" };
   } finally {
     // A session costs money while open; close it even when a step fails.
     await fetcher(`${kernelBase}/${id}`, {

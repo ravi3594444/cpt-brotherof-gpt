@@ -30,26 +30,33 @@ export function webResearch({ keys, engine, model, conversation }: {
   /** Recent turns, so Search API planning can resolve follow-ups. */
   conversation: ModelMessage[];
 }): Research {
-  return async (task, signal, progress) => {
-    progress.step("Choosing a research path");
-    const chosen = await chooseResearchEngine(
-      engine,
-      { ...keys, visionAgent: !!(keys.kernelKey && keys.vision) },
-      task,
-      signal,
-      fetch,
-      progress.step,
-    );
-    // The Search API path stays in "searching" until it starts reading pages.
-    progress.update(chosen === "tavily" ? { engine: chosen } : { phase: "reading", engine: chosen });
-    if (chosen === "tavily")
-      return { ...(await searchApiResearch(task, keys.searchKey, model, conversation, signal, progress)), engine: chosen };
-    const finding = chosen === "browser_use"
-      ? await browserUseResearch(task, keys.browserUseKey, signal, fetch, progress.step)
-      : chosen === "vision_agent" && keys.vision
-        ? await visionAgentResearch(task, { kernelKey: keys.kernelKey, vision: keys.vision }, signal, fetch, progress.step)
-        : await kernelResearch(task, keys.kernelKey, signal, fetch, progress.step);
-    return { ...finding, engine: chosen };
+  return async (task, request, progress, deadline) => {
+    // Engines end by the deadline themselves; this stops any request still waiting just after it.
+    const signal = AbortSignal.any([request, AbortSignal.timeout(Math.max(0, deadline - Date.now()) + 5000)]);
+    try {
+      progress.step("Choosing a research path");
+      const chosen = await chooseResearchEngine(
+        engine,
+        { ...keys, visionAgent: !!(keys.kernelKey && keys.vision) },
+        task,
+        signal,
+        fetch,
+        progress.step,
+      );
+      // The Search API path stays in "searching" until it starts reading pages.
+      progress.update(chosen === "tavily" ? { engine: chosen } : { phase: "reading", engine: chosen });
+      if (chosen === "tavily")
+        return { ...(await searchApiResearch(task, keys.searchKey, model, conversation, signal, progress)), engine: chosen };
+      const finding = chosen === "browser_use"
+        ? await browserUseResearch(task, keys.browserUseKey, signal, fetch, progress.step, { deadline })
+        : chosen === "vision_agent" && keys.vision
+          ? await visionAgentResearch(task, { kernelKey: keys.kernelKey, vision: keys.vision }, signal, fetch, progress.step, { deadline })
+          : await kernelResearch(task, keys.kernelKey, signal, fetch, progress.step, { deadline });
+      return { ...finding, engine: chosen };
+    } catch (error) {
+      if (request.aborted || !signal.aborted) throw error;
+      throw new ResearchError("Research ran out of time. Try a narrower question.");
+    }
   };
 }
 

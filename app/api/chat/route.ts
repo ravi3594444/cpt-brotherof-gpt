@@ -57,6 +57,8 @@ const wait = (ms: number, signal: AbortSignal) =>
     signal.addEventListener("abort", abort, { once: true });
   });
 export async function POST(request: Request) {
+  // Research and the answer share the 280-second ceiling from here.
+  const startedAt = Date.now();
   const origin = request.headers.get("origin");
   if (origin && origin !== new URL(request.url).origin)
     return new Response("This request must come from your Scout workspace.", {
@@ -207,6 +209,7 @@ export async function POST(request: Request) {
         photos,
         photosToModel,
         signal,
+        startedAt,
       });
     },
   });

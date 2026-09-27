@@ -292,6 +292,68 @@ try {
     await context.close();
   }
   {
+    // Live research that failed but reached the model, then research that kept partial results.
+    const context = await browser.newContext({ viewport: PHONE });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.route("**/api/config", (route) => route.fulfill({ json: {
+      access: "open", demo: false, modelConnected: true, searchConnected: true, modelName: "Atria Dawn Preview",
+      engines: { browserUse: true, kernel: false, visionAgent: false, tavily: false, jev: false, vision: false },
+    } }));
+    const reason = "The browser agent ran out of time before it reached a usable page. Try a narrower question or choose Kernel.";
+    const partial = "The browser agent ran out of time; these are the pages it had reached";
+    const task = "best shirts on shein";
+    const steps = ["Atria Dawn Preview started research: “best shirts on shein”", "Selected Browser Use Cloud", "Browser agent is visiting pages"];
+    const research = (data) => ({ type: "data-research", id: "research", data: { queries: [task], demo: false, steps, ...data } });
+    const answer = (text) => [
+      { type: "text-start", id: "answer" },
+      { type: "text-delta", id: "answer", delta: text },
+      { type: "text-end", id: "answer" },
+      { type: "finish", finishReason: "stop" },
+    ];
+    const replies = [
+      [
+        { type: "start", messageId: "failed-1", messageMetadata: { demo: false } },
+        research({ phase: "reading", sources: [], engine: "browser_use" }),
+        research({ phase: "writing", sources: [], warning: reason, failed: true }),
+        ...answer("The research ran out of time, so this is not from sources: linen shirts are a safe pick."),
+      ],
+      [
+        { type: "start", messageId: "partial-1", messageMetadata: { demo: false } },
+        research({ phase: "reading", sources: [], engine: "browser_use" }),
+        research({
+          phase: "complete", engine: "browser_use", warning: partial,
+          sources: [{ title: "Men's Shirts | SHEIN USA", url: "https://us.shein.com/Men-Shirts-c-1979.html", content: "Top rated: a linen shirt." }],
+        }),
+        ...answer("A linen shirt is top rated [1](https://us.shein.com/Men-Shirts-c-1979.html)."),
+      ],
+    ];
+    let asked = 0;
+    await page.route("**/api/chat", (route) => route.fulfill(stream(replies[Math.min(asked++, 1)])));
+    await page.goto(BASE, { waitUntil: "networkidle" });
+    await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+    await page.getByRole("textbox").fill("find me some best shirts on shein");
+    await page.getByRole("textbox").press("Enter");
+    await page.waitForSelector(".answer-actions", { timeout: 10000 });
+    const failed = page.locator(".assistant-message").nth(0).locator(".agent-activity");
+    const failedText = await failed.innerText();
+    check("research that failed but reached the model says \"Research incomplete\" with the reason",
+      /Research incomplete/.test(failedText) && failedText.includes(reason) && !/Research stopped/.test(failedText), failedText);
+    check("  the reason is on its own line, not cut off",
+      await failed.locator(".activity-warning", { hasText: "ran out of time" }).isVisible(), failedText);
+    await shot(page, "research-incomplete-phone");
+    await page.getByRole("textbox").fill("try again, men's linen shirts");
+    await page.getByRole("textbox").press("Enter");
+    await page.waitForFunction(() => document.querySelectorAll(".answer-actions").length === 2, null, { timeout: 10000 }).catch(() => {});
+    const kept = page.locator(".assistant-message").nth(1).locator(".agent-activity");
+    const keptText = await kept.innerText();
+    check("  partial results say Research complete and show the warning line",
+      /Research complete/.test(keptText) && await kept.locator(".activity-warning", { hasText: partial }).isVisible(), keptText);
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
     // Many sources: every one gets a card in a row that swipes sideways.
     const { context, page, errors } = await open(PHONE);
     const sources = Array.from({ length: 6 }, (_, i) => ({

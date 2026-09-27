@@ -1271,8 +1271,9 @@ function ResearchActivity({
   const [openChoice, setOpen] = useState<boolean | null>(null);
   const open = openChoice ?? active;
   const incomplete = !active && data.phase !== "complete";
+  // Failed research the model was told about is incomplete; a request cut off or cancelled stopped it.
   const label = incomplete
-    ? "Research stopped"
+    ? data.failed ? "Research incomplete" : "Research stopped"
     : data.demo
       ? data.phase === "complete"
         ? "Sample research complete"
@@ -1307,12 +1308,11 @@ function ResearchActivity({
           <Check size={16} className="shrink-0" />
         )}
         <span className="activity-label">{label}</span>
-        <span className="activity-detail">
-          {detail}
-          {data.warning ? ` · ${data.warning}` : ""}
-        </span>
+        <span className="activity-detail">{detail}</span>
         <ChevronRight size={15} className="trailing shrink-0" />
       </button>
+      {/* Its own line, so a reason or a partial result is never cut off. */}
+      {data.warning && <p className="activity-warning">{data.warning}</p>}
       {open && !!data.steps?.length && (
         <ol className="agent-steps" aria-label="Research actions">
           {data.steps.map((step, i) => (

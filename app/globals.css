@@ -745,6 +745,12 @@ h1 {
 .agent-activity.open .trailing {
   transform: rotate(90deg);
 }
+.activity-warning {
+  padding: 7px 14px 0 35px;
+  color: #aab9a1;
+  font-size: 12px;
+  line-height: 1.4;
+}
 .agent-steps {
   padding: 11px 14px 2px 35px;
   display: grid;

@@ -183,9 +183,13 @@ test("a failed research goes back to the model as an error, and the answer still
   const model = mockModel([callsResearch(["ferns"]), reply("I couldn't research that just now.")]);
   const { research } = fakeResearch(new ResearchError("Kernel could not read these pages. Try Browser Use Cloud."));
   const parts = await answer({ model, research });
-  assert.deepEqual(toolOutputs(model.doStreamCalls[1]), [{ error: "Kernel could not read these pages. Try Browser Use Cloud." }]);
+  const [output] = toolOutputs(model.doStreamCalls[1]);
+  assert.equal(output.error, "Kernel could not read these pages. Try Browser Use Cloud.");
+  assert.equal(output.canRetry, true);
+  assert.match(output.retry, /once more/);
   const data = researchData(parts);
   assert.equal(data.warning, "Kernel could not read these pages. Try Browser Use Cloud.");
+  assert.equal(data.failed, true, "the model was told, so the panel says Research incomplete");
   assert.notEqual(data.phase, "complete");
   assert.deepEqual(data.sources, []);
   assert.ok(!parts.some((p) => p.type === "source-url"));
@@ -200,6 +204,131 @@ test("an unexpected research failure gets a plain message, not the raw error", a
   const [output] = toolOutputs(model.doStreamCalls[1]);
   assert.ok(output.error && !/ECONNRESET/.test(output.error), JSON.stringify(output));
   assert.equal(researchData(parts).warning, output.error);
+});
+
+// Research outcomes in order, each taking `took` ms on a fake clock that starts with the request.
+function timedResearch(outcomes) {
+  const clock = { now: 1_000_000 };
+  const calls = [];
+  const research = async (task, signal, progress, deadline) => {
+    const outcome = outcomes[calls.length];
+    calls.push({ task, deadline, at: clock.now });
+    progress.step(`Selected ${outcome.engine === "browser_use" ? "Browser Use Cloud" : "Kernel"}`);
+    progress.update({ phase: "reading", engine: outcome.engine || "kernel" });
+    clock.now += outcome.took;
+    if (outcome.error) throw outcome.error;
+    return outcome.finding;
+  };
+  return { research, calls, clock: () => clock.now, startedAt: clock.now };
+}
+const timedOut = new ResearchError("The browser agent ran out of time before it reached a usable page. Try a narrower question or choose Kernel.");
+const shirts = [
+  { title: "Linen shirt", url: "https://us.shein.com/linen", content: "Rated 4.8 stars." },
+  { title: "Oxford shirt", url: "https://us.shein.com/oxford", content: "Rated 4.6 stars." },
+];
+
+test("a quick research failure lets the model try once more, and the answer cites the second attempt", async () => {
+  const model = mockModel([
+    callsResearch(["best shirts on shein"]),
+    callsResearch(["top rated men's linen shirts on shein.com"]),
+    reply("The linen shirt rates best [1](https://us.shein.com/linen)."),
+  ]);
+  const timed = timedResearch([
+    { took: 20_000, error: timedOut, engine: "browser_use" },
+    { took: 40_000, finding: { sources: shirts, engine: "kernel" } },
+  ]);
+  const parts = await answer({ model, ...timed, question: "find me some best shirts on shein" });
+  assert.deepEqual(timed.calls.map((c) => c.task), ["best shirts on shein", "top rated men's linen shirts on shein.com"]);
+  // The first research ends 200 s into the request; a second one leaves the answer 60 s of the 280.
+  assert.deepEqual(timed.calls.map((c) => c.deadline - timed.startedAt), [200_000, 220_000]);
+
+  const [first, retry, final] = model.doStreamCalls;
+  assert.equal(model.doStreamCalls.length, 3);
+  assert.deepEqual(first.toolChoice, { type: "auto" });
+  assert.deepEqual(retry.toolChoice, { type: "auto" }, "the model may research again after a quick failure");
+  const [failure] = toolOutputs(retry);
+  assert.equal(failure.error, timedOut.message);
+  assert.equal(failure.canRetry, true);
+  assert.equal(failure.secondsLeft, 260);
+  assert.deepEqual(final.tools?.map((t) => t.name), ["web_research"]);
+  assert.deepEqual(final.toolChoice, { type: "none" });
+  assert.deepEqual(toolOutputs(final)[1].map((s) => s.url), shirts.map((s) => s.url));
+
+  const data = researchData(parts);
+  assert.equal(data.phase, "complete");
+  assert.equal(data.failed, undefined);
+  assert.equal(data.warning, undefined);
+  assert.deepEqual(data.queries, ["best shirts on shein", "top rated men's linen shirts on shein.com"]);
+  assert.deepEqual(data.steps, [
+    "Atria started research: “best shirts on shein”",
+    "Selected Browser Use Cloud",
+    `Research did not finish: ${timedOut.message}`,
+    "Atria started research again: “top rated men's linen shirts on shein.com”",
+    "Selected Kernel",
+    "Atria is writing an answer from the sources",
+  ]);
+  assert.deepEqual(data.sources.map((s) => s.url), shirts.map((s) => s.url));
+  assert.deepEqual(parts.filter((p) => p.type === "source-url").map((p) => p.url), shirts.map((s) => s.url));
+  assert.equal(answerText(parts), "The linen shirt rates best [1](https://us.shein.com/linen).");
+});
+
+test("a research failure with little time left cannot be retried, and the next step cannot call the tool", async () => {
+  const model = mockModel([callsResearch(["best shirts on shein"]), reply("The research ran out of time, so this is general knowledge.")]);
+  const timed = timedResearch([{ took: 195_000, error: timedOut, engine: "browser_use" }]);
+  const parts = await answer({ model, ...timed });
+  assert.equal(timed.calls.length, 1);
+  const [failure] = toolOutputs(model.doStreamCalls[1]);
+  assert.equal(failure.canRetry, false);
+  assert.equal(failure.secondsLeft, 85);
+  assert.equal(failure.error, timedOut.message);
+  assert.deepEqual(model.doStreamCalls[1].tools?.map((t) => t.name), ["web_research"]);
+  assert.deepEqual(model.doStreamCalls[1].toolChoice, { type: "none" });
+  const data = researchData(parts);
+  assert.equal(data.failed, true);
+  assert.equal(data.warning, timedOut.message);
+  assert.notEqual(data.phase, "complete");
+});
+
+test("research that returns no sources counts as a failure the model may retry", async () => {
+  const model = mockModel([callsResearch(["a"]), callsResearch(["b"]), reply("Found it [1](https://us.shein.com/linen).")]);
+  const timed = timedResearch([
+    { took: 5_000, finding: { sources: [], engine: "kernel" } },
+    { took: 5_000, finding: { sources: shirts, engine: "kernel" } },
+  ]);
+  await answer({ model, ...timed });
+  assert.equal(timed.calls.length, 2);
+  assert.equal(toolOutputs(model.doStreamCalls[1])[0].canRetry, true);
+});
+
+test("a third research call never runs", async () => {
+  const model = mockModel([
+    callsResearch(["a"]),
+    callsResearch(["b"]),
+    callsResearch(["c"], "Research failed twice, so this is from what I know."),
+    reply("never reached"),
+  ]);
+  const timed = timedResearch([
+    { took: 5_000, error: timedOut },
+    { took: 5_000, error: timedOut },
+    { took: 5_000, error: timedOut },
+  ]);
+  const parts = await answer({ model, ...timed });
+  assert.deepEqual(timed.calls.map((c) => c.task), ["a", "b"]);
+  assert.equal(model.doStreamCalls.length, 3);
+  assert.equal(toolOutputs(model.doStreamCalls[2])[1].canRetry, false);
+  assert.deepEqual(model.doStreamCalls[2].toolChoice, { type: "none" });
+  assert.equal(answerText(parts), "Research failed twice, so this is from what I know.");
+  assert.equal(researchData(parts).failed, true);
+});
+
+test("the model is told never to promise research it is not doing in the same reply", async () => {
+  const model = mockModel([reply("Hi!")]);
+  await answer({ model, research: fakeResearch().research });
+  const system = systemOf(model.doStreamCalls[0]);
+  assert.match(system, /Never say you will do something later, such as “let me try again” or “I will search”, unless you call web_research in this same reply/);
+  assert.match(system, /cannot retry, say in one sentence what happened/);
+  assert.match(system, /clear caveat that it is not from sources/);
+  assert.match(system, /suggest how to narrow the question/);
 });
 
 test("a request abort during research stops everything", async () => {

@@ -13,6 +13,8 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 | Research | Gathering Sources with a Research engine for the task the Answer model gave the Research tool, before the Answer is written. | search (when a browser does it) |
 | Research tool | The `web_research` tool the Answer model calls when a Question needs Research. The Answer model decides; Scout has no rules of its own for it. | search tool, auto-research |
 | Research engine | The service that gathers Sources: Browser Use Cloud, Kernel, or the Search API. | browser (for the Search API) |
+| Research budget | The time Research may take for one Question: it ends 200 seconds after the request starts (a second try, 220), so the Answer has time before the 280-second ceiling. | timeout |
+| Partial result | The pages a browser agent had reached when it ran out of time or stopped early, kept as Sources that are not Read, with a warning. | partial answer |
 | Auto | The Research engine setting that lets Scout choose the engine. | default engine |
 | Browser Use Cloud | A hosted browser agent that navigates sites and returns page summaries. | Browser Use session (for Kernel) |
 | Kernel | A separate hosted cloud browser that runs Scout's fixed page-reading script. | Browser Use |
@@ -40,17 +42,17 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 ## Relationships
 
 - A **Conversation** holds Questions and Answers in order.
-- An **Answer** has at most one **Research** record: its phase, **Research steps**, **Sources**, engine, and any warning.
-- With **Search the web** on, the **Answer model** has the **Research tool** and calls it at most once per **Question**, only when the Question needs Research. An Answer it writes without the tool has no Research record and no **Citations**.
+- An **Answer** has at most one **Research** record: its phase, the **Research steps** of every try in order, **Sources**, engine, and any warning.
+- With **Search the web** on, the **Answer model** has the **Research tool** and calls it once per **Question**, only when the Question needs Research. It may call it once more only when that Research failed or found no Sources and at least 90 seconds of the ceiling remain; a third call never runs. An Answer it writes without the tool has no Research record and no **Citations**.
 - When the provider cannot take tools, the **Answer model** makes the same choice as a one-word reply (RESEARCH or ANSWER); an unclear reply means Research.
 - A **Citation** number n refers to the n-th **Source** of the same Answer's Research.
 - **Auto** asks **JEV** only when Browser Use Cloud, Kernel, and the JEV key are all connected. With one browser connected, Auto uses it. With none, it uses the **Search API**.
-- **Browser Use Cloud** Sources are never **Read**; **Kernel** page text is Read; **Search API** Sources are Read only after page extraction succeeds.
+- **Browser Use Cloud** Sources, including **Partial results**, are never **Read**; **Kernel** page text is Read; **Search API** Sources are Read only after page extraction succeeds.
 
 ## States and lifecycles
 
-- **Research phase**: searching → reading → writing → complete. It shows "Research stopped" if the request ends before complete, or if Research fails; the Answer model then says it failed.
-- **Browser Use Cloud run**: queued → dispatching → running → completed, failed, or cancelled.
+- **Research phase**: searching → reading → writing → complete. When Research fails and the Answer model is told why, it shows "Research incomplete" with the reason, and the Answer model says what happened. It shows "Research stopped" if the request is cut off or cancelled before complete.
+- **Browser Use Cloud run**: queued → dispatching → running → completed, failed, or cancelled. Scout polls its status until the **Research budget** ends, then keeps the pages the agent reached as **Partial results** and cancels the run. After every run Scout stops its cloud browser.
 - **Sample mode**: on until a Research engine is connected; the Sample switch overrides it for the current Conversation.
 
 ## Ambiguities

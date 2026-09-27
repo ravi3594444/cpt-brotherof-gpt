@@ -116,6 +116,9 @@ export async function readPages(
     partial: urls.some((url) => !content.has(url)),
   };
 }
+/** True for a search engine's results page, which leads to sources but is not one. */
+export const isSearchPage = (url: string) =>
+  /(^|\.)(bing\.com|google\.[a-z.]+|duckduckgo\.com)$/.test(new URL(url).hostname);
 const closers: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
 // Trailing punctuation and unbalanced closing brackets belong to the sentence, not the link.
 function trimLinkEnd(raw: string): string {
