@@ -72,7 +72,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { LogoReveal } from "@/components/logo-reveal";
-import { Elapsed, Thinking } from "@/components/thinking";
+import { Elapsed, FollowNewQuestion, Thinking } from "@/components/thinking";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import {
@@ -93,7 +93,7 @@ import {
   usePromptInputAttachments,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
-import { capThinking, MAX_PHOTOS, requestTurns } from "@/lib/conversation";
+import { capThinking, MAX_PHOTOS, requestTurns, withoutOlderThinking } from "@/lib/conversation";
 import { ACCESS_HEADER } from "@/lib/access";
 import { historyPhotoUrl, preparePhoto } from "@/lib/photos";
 import { SIDEBAR_BOOT_ATTRIBUTE, readSidebarOpen, saveSidebarOpen } from "@/lib/sidebar";
@@ -315,7 +315,12 @@ export default function Home() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(threads));
       } catch {
-        toast.error("Your browser could not save this conversation.");
+        try {
+          // Out of room: older conversations give up their thinking so this one still saves.
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(withoutOlderThinking(threads)));
+        } catch {
+          toast.error("Your browser could not save this conversation.");
+        }
       }
     }
   }, [threads, loaded]);
@@ -1219,6 +1224,7 @@ function ChatWorkspace({
                   </div>
                 )}
               </ConversationContent>
+              <FollowNewQuestion asked={status === "submitted"} />
               <ConversationScrollButton className="bg-card border-border" />
             </Conversation>
             <div className="bottom-composer">{composer}</div>

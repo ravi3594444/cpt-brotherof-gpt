@@ -3,8 +3,10 @@ import { test } from "node:test";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError } from "ai";
 import { MockLanguageModelV4, convertArrayToReadableStream } from "ai/test";
-import { streamAnswer } from "../lib/answer.ts";
-import { capThinking, MAX_SAVED_THINKING, modelConversation, requestTurns } from "../lib/conversation.ts";
+import { outputLimitRejected, streamAnswer } from "../lib/answer.ts";
+import {
+  capThinking, MAX_SAVED_THINKING, modelConversation, requestTurns, withoutOlderThinking,
+} from "../lib/conversation.ts";
 import { ResearchError } from "../lib/research.ts";
 import { webResearch } from "../lib/web-research.ts";
 
@@ -229,6 +231,106 @@ test("a think tag later in the answer stays in the answer", async () => {
   assert.equal(answerText(parts), "Models such as R1 wrap reasoning in `<think>` tags.");
 });
 
+test("an answer keeps its own leading indentation; only blank lines before it go", async () => {
+  const cases = [
+    // An answer that opens with an indented code block.
+    [textParts("t", ["    indented code\nHi"]), "    indented code\nHi"],
+    [textParts("t", ["\n", "  ", "  code\n", "Hi"]), "    code\nHi"],
+    // Blank lines after a provider's reasoning or a think block, and a space after the close tag.
+    [[...reasoningParts("r", ["Hmm."]), ...textParts("t", ["\n\nHi"])], "Hi"],
+    [textParts("t", ["<think>Hmm.</think>\n\n", "    code\nHi"]), "    code\nHi"],
+    [textParts("t", ["<think>Hmm.</think> Hi"]), "Hi"],
+  ];
+  for (const [parts, expected] of cases) {
+    const model = mockModel([step(...parts, finish())]);
+    assert.equal(answerText(await answer({ model })), expected, JSON.stringify(parts));
+  }
+});
+
+test("think tags are read in any case, and a think block right after another is thinking too", async () => {
+  const cases = [
+    [["<THINK>hidden</THINK>Hi"], ["hidden"]],
+    [["<Thinking>hidden</thinking>", "Hi"], ["hidden"]],
+    [["<think>a</think>", "<think>b</think>Hi"], ["a", "b"]],
+    [["<think>a</think>\n<thi", "nk>b</think>\n\nHi"], ["a", "b"]],
+  ];
+  for (const [deltas, expected] of cases) {
+    const model = mockModel([step(...textParts("t", deltas), finish())]);
+    const parts = await answer({ model });
+    assert.deepEqual(thoughts(parts), expected, deltas.join(""));
+    assert.equal(answerText(parts), "Hi", deltas.join(""));
+    assert.ok(allClosed(parts));
+  }
+  // Once the answer has begun, a think tag is part of it.
+  const model = mockModel([step(...textParts("t", ["<think>a</think>Hi ", "<think>b</think>"]), finish())]);
+  const parts = await answer({ model });
+  assert.deepEqual(thoughts(parts), ["a"]);
+  assert.equal(answerText(parts), "Hi <think>b</think>");
+});
+
+test("an empty thought shows no Thinking at all", async () => {
+  for (const parts of [
+    textParts("t", ["<think>\n\n</think>\n\n", "Hi"]),
+    [...reasoningParts("r", ["\n", "  "]), ...textParts("t", ["Hi"])],
+  ]) {
+    const model = mockModel([step(...parts, finish())]);
+    const written = await answer({ model });
+    assert.deepEqual(written.filter((p) => p.type.startsWith("reasoning")), [], JSON.stringify(parts));
+    assert.deepEqual(thinkingMs(written), []);
+    assert.equal(answerText(written), "Hi");
+  }
+  // A thought's leading blank lines are dropped; the rest streams as written.
+  const model = mockModel([step(...reasoningParts("r", ["\n\n", "The user", " says hi."]), ...textParts("t", ["Hi"]), finish())]);
+  assert.deepEqual(thoughts(await answer({ model })), ["The user says hi."]);
+});
+
+const maxTokensError = (message) => new APICallError({
+  message,
+  url: "https://api.example.com/v1/chat/completions",
+  requestBodyValues: {},
+  statusCode: 400,
+  responseBody: JSON.stringify({ error: { message, type: "invalid_request_error" } }),
+  isRetryable: false,
+});
+
+test("a model whose output cap is below 16000 gets the answer with a smaller limit", async () => {
+  const limited = maxTokensError("Invalid max_tokens value, the valid range of max_tokens is [1, 8192]");
+  const model = mockModel([
+    limited,
+    step(...reasoningParts("r", ["Just a greeting."]), ...textParts("t", ["Hello!"]), finish()),
+  ]);
+  const parts = await answer({ model });
+  assert.deepEqual(model.doStreamCalls.map((c) => c.maxOutputTokens), [16000, 4096]);
+  assert.ok(model.doStreamCalls[1].tools?.length, "the Research tool is still offered");
+  assert.equal(answerText(parts), "Hello!");
+  assert.deepEqual(thoughts(parts), ["Just a greeting."]);
+
+  // The smaller limit carries into the plain-text fallback, and nothing is retried twice.
+  const fallback = mockModel([limited, toolsUnsupported(), step(...textParts("t", ["Hi"]), finish())], "ANSWER");
+  assert.equal(answerText(await answer({ model: fallback })), "Hi");
+  assert.deepEqual(fallback.doStreamCalls.map((c) => c.maxOutputTokens), [16000, 4096, 4096]);
+  const stubborn = mockModel([limited, limited]);
+  await assert.rejects(answer({ model: stubborn }), (error) => error === limited);
+  assert.equal(stubborn.doStreamCalls.length, 2);
+});
+
+test("recognises a provider turning the answer's output limit away", () => {
+  for (const message of [
+    "Invalid max_tokens value, the valid range of max_tokens is [1, 8192]",
+    "max_tokens is too large: 16000. This model supports at most 4096 completion tokens, whereas you provided 16000.",
+    "'max_tokens' or 'max_completion_tokens' is too large: 16000. This model's maximum context length is 32768 tokens and your request has 20000 input tokens (16000 > 32768 - 20000).",
+    "This model's maximum context length is 32768 tokens. However, you requested 36000 tokens (20000 in the messages, 16000 in the completion). Please reduce the length of the messages or completion.",
+  ])
+    assert.equal(outputLimitRejected(maxTokensError(message)), true, message);
+  for (const error of [
+    maxTokensError("This model's maximum context length is 128000 tokens. However, your messages resulted in 130211 tokens (129800 in the messages, 411 in the functions). Please reduce the length of the messages or functions."),
+    toolsUnsupported(),
+    new APICallError({ message: "max_tokens", url: "u", requestBodyValues: {}, statusCode: 500 }),
+    new Error("max_tokens is too large"),
+  ])
+    assert.equal(outputLimitRejected(error), false, error.message);
+});
+
 test("a model that runs out of room while thinking says so", async () => {
   const model = mockModel([step(...reasoningParts("r", ["Thinking a lot"]), finish("length"))]);
   await assert.rejects(answer({ model }), (error) => error instanceof ResearchError && /ran out of room/.test(error.message));
@@ -281,12 +383,28 @@ test("saved thinking is capped per message", () => {
   assert.deepEqual(over.parts.map((p) => p.text.length), [20000, 0]);
 });
 
+test("when the device runs out of room, older conversations give up their thinking first", () => {
+  const thread = (id, parts) => ({ id, title: id, updatedAt: 1, messages: [{ id: `${id}-1`, role: "assistant", parts }] });
+  const newest = thread("new", [reasoning("Fresh thought"), { type: "text", text: "New answer" }]);
+  const older = thread("old", [reasoning("Old thought"), { type: "data-research", data: {} }, { type: "text", text: "Old answer" }]);
+  const plain = thread("plain", [{ type: "text", text: "Hi" }]);
+  const saved = withoutOlderThinking([newest, older, plain]);
+  assert.equal(saved[0], newest, "the newest conversation keeps its thinking");
+  assert.deepEqual(saved[1].messages[0].parts.map((p) => p.type), ["data-research", "text"]);
+  assert.equal(saved[1].messages[0].parts.at(-1).text, "Old answer");
+  assert.equal(saved[2], plain);
+  assert.equal(older.messages[0].parts.length, 3, "the conversations on screen are left alone");
+});
+
 // ---- Search API query planning ----
 
 test("Search API planning leaves room for a reasoning model and reads the queries after its thinking", async () => {
   const replies = [
     "<think>\nThe user wants shade ferns. Two queries.\n</think>\n[\"ferns for shade\", \"balcony ferns\"]",
     "<think>The user wants shade ferns.",
+    // A plan about think tags is still a plan.
+    "[\"what does the <think> tag do in Qwen3\"]",
+    "<THINK>One query.</THINK><think>Still one.</think>\n```json\n[\"qwen3 think tag\"]\n```",
   ];
   for (const reply of replies) {
     const model = new MockLanguageModelV4({
@@ -311,7 +429,9 @@ test("Search API planning leaves room for a reasoning model and reads the querie
       globalThis.fetch = originalFetch;
     }
     assert.ok(model.doGenerateCalls[0].maxOutputTokens >= 1000, String(model.doGenerateCalls[0].maxOutputTokens));
-    if (reply.includes("</think>")) assert.deepEqual(searched.sort(), ["balcony ferns", "ferns for shade"]);
+    if (reply.includes("balcony ferns")) assert.deepEqual(searched.sort(), ["balcony ferns", "ferns for shade"]);
+    else if (reply.includes("Qwen3")) assert.deepEqual(searched, ["what does the <think> tag do in Qwen3"]);
+    else if (reply.includes("qwen3")) assert.deepEqual(searched, ["qwen3 think tag"]);
     // Unfinished thinking is not a plan: the task itself is the query.
     else assert.deepEqual(searched, ["Ferns for a shady balcony"]);
   }

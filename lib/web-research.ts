@@ -91,7 +91,7 @@ async function searchApiResearch(
       abortSignal: AbortSignal.any([signal, AbortSignal.timeout(12000)]),
     });
     // Unfinished thinking is not a plan: it strips to nothing and the task is searched as is.
-    const reply = plan.text.replace(/<(think(?:ing)?)>[\s\S]*?(?:<\/\1>|$)/gi, "");
+    const reply = plan.text.replace(/^(?:\s*<(think(?:ing)?)>[\s\S]*?(?:<\/\1>|$))+/i, "");
     const parsed = JSON.parse(reply.slice(reply.indexOf("["), reply.lastIndexOf("]") + 1));
     if (Array.isArray(parsed) && parsed.length && parsed.every((v) => typeof v === "string" && v.trim()))
       queries = parsed.slice(0, 2).map((q: string) => q.slice(0, 300));

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
@@ -19,6 +19,15 @@ export function Elapsed({ from = 0, after = 1, className }: { from?: number; aft
   }, []);
   const seconds = (from + ms) / 1000;
   return seconds >= after ? <span className={className}>{formatSeconds(seconds)}</span> : null;
+}
+
+/** Inside a Conversation: a new question brings it back to following the answer, even after a row opened. */
+export function FollowNewQuestion({ asked }: { asked: boolean }) {
+  const { scrollToBottom } = useStickToBottomContext();
+  useEffect(() => {
+    if (asked) void scrollToBottom();
+  }, [asked, scrollToBottom]);
+  return null;
 }
 
 /**
@@ -45,6 +54,12 @@ export function Thinking({
   const [open, setOpen] = useState(false);
   const id = useId();
   const { stopScroll } = useStickToBottomContext();
+  const box = useRef<HTMLDivElement>(null);
+  // While a thought streams, the open box shows its newest line until the reader scrolls up in it.
+  const follow = useRef(true);
+  useEffect(() => {
+    if (open && thinking && follow.current && box.current) box.current.scrollTop = box.current.scrollHeight;
+  }, [open, thinking, text]);
   const label = thinking
     ? "Thinking…"
     : stopped
@@ -60,8 +75,12 @@ export function Thinking({
         aria-expanded={open}
         aria-controls={open ? id : undefined}
         onClick={() => {
-          // Opens in place: the conversation stops following the bottom so the row stays in view.
-          if (!open) stopScroll();
+          // Opens in place: the conversation stops following the bottom so the row stays in view,
+          // until the next question.
+          if (!open) {
+            stopScroll();
+            follow.current = true;
+          }
           setOpen(!open);
         }}
       >
@@ -71,7 +90,18 @@ export function Thinking({
         <ChevronRight size={15} className="trailing shrink-0" aria-hidden="true" />
       </button>
       {open && (
-        <div id={id} className="thinking-text" role="region" aria-label="The AI model's thinking" tabIndex={0}>
+        <div
+          ref={box}
+          id={id}
+          className="thinking-text"
+          role="region"
+          aria-label="The AI model's thinking"
+          tabIndex={0}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          }}
+        >
           {text || "…"}
         </div>
       )}

@@ -122,6 +122,18 @@ export function capThinking<T extends { parts: ChatPart[] }>(message: T): T {
   return cut ? { ...message, parts } : message;
 }
 
+/** Saved conversations for a device out of room: every one but the newest gives up its thinking. */
+export function withoutOlderThinking<T extends { messages: { parts: ChatPart[] }[] }>(threads: T[]): T[] {
+  return threads.map((thread, i) =>
+    !i || !thread.messages.some((m) => m.parts.some((p) => p.type === "reasoning"))
+      ? thread
+      : {
+        ...thread,
+        messages: thread.messages.map((m) => ({ ...m, parts: m.parts.filter((p) => p.type !== "reasoning") })),
+      },
+  );
+}
+
 /** The message shown when the answer model fails for a reason Scout did not name itself. */
 export function answerErrorMessage({ photos, aborted }: { photos: number; aborted: boolean }) {
   if (aborted) return "Research stopped or timed out. Please try again.";

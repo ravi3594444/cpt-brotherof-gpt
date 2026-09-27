@@ -45,7 +45,7 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 - With **Search the web** on, the **Answer model** has the **Research tool** and calls it at most once per **Question**, only when the Question needs Research. An Answer it writes without the tool has no Research record and no **Citations**.
 - When the provider cannot take tools, the **Answer model** makes the same choice as a one-word reply (RESEARCH or ANSWER); an unclear reply means Research.
 - A **Citation** number n refers to the n-th **Source** of the same Answer's Research.
-- An **Answer** can have **Thinking** from before and after the Research tool call; it shows as one row, above the Research panel when the model thought before researching. Thinking is kept on the device, up to 20,000 characters per Answer, and never sent back to the **Answer model**.
+- An **Answer** can have **Thinking** from before and after the Research tool call; it shows as one row, above the Research panel when the model thought before researching. Thinking is kept on the device, up to 20,000 characters per Answer (older Conversations give theirs up first when the device runs out of room), and never sent back to the **Answer model**.
 - **Auto** asks **JEV** only when Browser Use Cloud, Kernel, and the JEV key are all connected. With one browser connected, Auto uses it. With none, it uses the **Search API**.
 - **Browser Use Cloud** Sources are never **Read**; **Kernel** page text is Read; **Search API** Sources are Read only after page extraction succeeds.
 

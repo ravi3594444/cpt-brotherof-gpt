@@ -412,12 +412,29 @@ try {
       { type: "start", messageId: "plain-1", messageMetadata: { demo: false } },
       { type: "text-start", id: "answer" },
       { type: "text-delta", id: "answer", delta: "It is sunny." },
-      { type: "text-end", id: "answer" },
-      { type: "finish", finishReason: "stop" },
     );
+    // A long answer, streamed after the reader opened the last Thinking row.
+    for (let i = 1; i <= 6; i++) {
+      await send({ type: "text-delta", id: "answer", delta: `\n\n${"Clear skies all afternoon, with a light breeze. ".repeat(6)}(${i})` });
+      await page.waitForTimeout(120);
+    }
+    await send({ type: "text-end", id: "answer" }, { type: "finish", finishReason: "stop" });
     await end();
     await page.waitForFunction(() => document.querySelectorAll(".answer-actions").length === 2, null, { timeout: 10000 });
     check("an answer without thinking shows no Thinking row", (await row(1).count()) === 0);
+    await page.waitForTimeout(900); // the conversation eases to the bottom
+    const followed = await page.evaluate(() => {
+      const scroller = document.querySelector(".conversation-inner").parentElement;
+      const actions = [...document.querySelectorAll(".answer-actions")].at(-1).getBoundingClientRect();
+      const composer = document.querySelector(".bottom-composer").getBoundingClientRect();
+      return {
+        fromBottom: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight),
+        scrolls: scroller.scrollHeight > scroller.clientHeight * 1.5,
+        endInView: actions.bottom <= composer.top + 1,
+      };
+    });
+    check("  after a Thinking row was opened, the next answer still streams into view",
+      followed.scrolls && followed.fromBottom < 80 && followed.endInView, JSON.stringify(followed));
 
     await ask("Find a fern for shade");
     const source = { title: "Fern care", url: "https://ferns.example/care", content: "Ferns like shade.", read: true };
@@ -468,6 +485,26 @@ try {
       { type: "reasoning-delta", id: "thinking-1", delta: "Half a thought" },
     );
     await row(3).waitFor({ timeout: 5000 });
+    // An open box follows a thought as it streams, until the reader scrolls up in it.
+    await toggle(3).click();
+    const lines = (from) => Array.from({ length: 40 }, (_, i) => `\nLine ${from + i}: still thinking it through.`).join("");
+    await send({ type: "reasoning-delta", id: "thinking-1", delta: lines(1) });
+    await page.waitForTimeout(300);
+    const box = row(3).locator(".thinking-text");
+    const position = () => box.evaluate((el) => ({
+      fromBottom: Math.round(el.scrollHeight - el.scrollTop - el.clientHeight),
+      top: Math.round(el.scrollTop),
+      tall: el.scrollHeight > el.clientHeight * 2,
+    }));
+    const live = await position();
+    check("  an open Thinking box shows the newest line while the thought streams",
+      live.tall && live.fromBottom < 24, JSON.stringify(live));
+    await box.evaluate((el) => { el.scrollTop = 0; });
+    await page.waitForTimeout(100);
+    await send({ type: "reasoning-delta", id: "thinking-1", delta: lines(41) });
+    await page.waitForTimeout(300);
+    const readBack = await position();
+    check("  and stays put once the reader scrolls up in it", readBack.top === 0, JSON.stringify(readBack));
     await end();
     await page.waitForFunction(() => !document.querySelector(".thinking-shimmer"), null, { timeout: 5000 }).catch(() => {});
     const cut = await toggle(3).innerText();
