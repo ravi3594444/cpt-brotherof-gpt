@@ -62,6 +62,71 @@ const stream = (chunks) => ({
   headers: { "content-type": "text/event-stream", "x-vercel-ai-ui-message-stream": "v1" },
   body: chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n",
 });
+// Runs in the page: /api/chat answers stay open until the test sends their chunks with
+// window.__answers[question].send(chunk) and .end(). Each starts like the server's, with
+// the answer model still thinking.
+function heldAnswers() {
+  window.__answers = {};
+  const realFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    if ((typeof input === "string" ? input : input.url) !== "/api/chat") return realFetch(input, init);
+    const question = JSON.parse(init.body).messages.at(-1).parts.find((p) => p.type === "text")?.text;
+    const encoder = new TextEncoder();
+    const answer = (window.__answers[question] = { aborted: false });
+    const body = new ReadableStream({
+      start(controller) {
+        answer.send = (chunk) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        answer.end = () => {
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        };
+        init.signal?.addEventListener("abort", () => {
+          answer.aborted = true;
+          controller.error(init.signal.reason);
+        });
+        answer.send({ type: "start", messageId: crypto.randomUUID(), messageMetadata: { demo: false } });
+      },
+    });
+    return Promise.resolve(new Response(body, {
+      headers: { "content-type": "text/event-stream", "x-vercel-ai-ui-message-stream": "v1" },
+    }));
+  };
+}
+const LIVE_CONFIG = {
+  access: "open", demo: false, modelConnected: true, searchConnected: true, modelName: "Test model",
+  engines: { browserUse: false, kernel: true, visionAgent: false, tavily: false, jev: false, vision: false },
+};
+async function openHeld({ viewport = { width: 1280, height: 800 }, config = () => LIVE_CONFIG } = {}) {
+  const context = await browser.newContext({ viewport });
+  await context.addInitScript(heldAnswers);
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.route("**/api/config", (route) => route.fulfill({ json: config() }));
+  await page.goto(BASE, { waitUntil: "networkidle" });
+  await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+  return { context, page, errors };
+}
+async function askHeld(page, question) {
+  await page.getByRole("textbox").fill(question);
+  await page.getByRole("textbox").press("Enter");
+  await page.waitForFunction((q) => window.__answers[q], question);
+}
+const sendHeld = (page, question, chunks, end = false) => page.evaluate(({ question, chunks, end }) => {
+  chunks.forEach(window.__answers[question].send);
+  if (end) window.__answers[question].end();
+}, { question, chunks, end });
+const writeText = (text) => [
+  { type: "text-start", id: "a" },
+  { type: "text-delta", id: "a", delta: text },
+];
+const finishText = [
+  { type: "text-end", id: "a" },
+  { type: "data-suggestions", data: ["Tell me more"] },
+  { type: "finish", finishReason: "stop" },
+];
+const conversationItem = (page, title) => page.locator(".scout-sidebar .history-item", { hasText: title });
+const answering = (page, title) => conversationItem(page, title).getByRole("img", { name: "Still answering" });
 // A solid-colour PNG, for attaching photos without fixture files.
 function png(width, height, [r, g, b]) {
   const row = Buffer.alloc(width * 3 + 1);
@@ -751,6 +816,281 @@ try {
     await page.locator(".scout-sidebar .history-item", { hasText: "AI agents search the web" }).click();
     const reopened = await page.waitForSelector(".answer-body", { timeout: 5000 }).then(() => true, () => false);
     check("a saved conversation reopens from the sidebar", reopened && (await page.locator(".user-message").count()) === 1);
+    await context.close();
+  }
+  {
+    // Switching away from a streaming sample answer at once, and straight back.
+    const { context, page, errors } = await open();
+    await chip(page, "AI agents search the web").click();
+    await finished(page);
+    await page.getByRole("button", { name: /New conversation/ }).click();
+    await chip(page, "Compare React and Next.js").click();
+    await conversationItem(page, "Compare React").waitFor({ timeout: 5000 });
+    const leftRunning = await answering(page, "Compare React").isVisible();
+    await conversationItem(page, "AI agents search the web").click();
+    await conversationItem(page, "Compare React").click();
+    await finished(page);
+    const text = await page.locator(".conversation").innerText();
+    const counts = { questions: await page.locator(".user-message").count(), answers: await page.locator(".assistant-message").count() };
+    check("a sample answer left at once and opened again is there in full, exactly once",
+      leftRunning && counts.questions === 1 && counts.answers === 1 && /prepared comparison/.test(text) && !/Research stopped/.test(text),
+      JSON.stringify({ leftRunning, counts, text: text.slice(0, 200) }));
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("scout-threads-v1") || "[]")
+      .find((t) => /Compare React/.test(t.title))?.messages.map((m) => m.role));
+    check("  and saved once", JSON.stringify(saved) === '["user","assistant"]', JSON.stringify(saved));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // Answers keep running in conversations that are not on screen, and show a spinner there.
+    const { context, page, errors } = await openHeld();
+    const running = () => page.locator('.scout-sidebar .history-item [aria-label="Still answering"]').count();
+    await askHeld(page, "First question");
+    check("while an answer runs, its conversation shows a spinner labelled Still answering",
+      await answering(page, "First question").isVisible());
+    await page.getByRole("button", { name: /New conversation/ }).click();
+    await page.waitForSelector(".suggestion-chip");
+    check("  New conversation leaves that answer running", await answering(page, "First question").isVisible());
+    await askHeld(page, "Second question");
+    check("  answers in two conversations run at the same time", (await running()) === 2, `${await running()} spinners`);
+    await shot(page, "answering-sidebar");
+    await conversationItem(page, "First question").click();
+    await page.locator(".user-message", { hasText: "First question" }).waitFor();
+    const waiting = await page.locator(".progress-strip").innerText({ timeout: 5000 }).catch(() => "");
+    check("  going back shows the answer still thinking, not stopped", /Thinking…/.test(waiting), waiting);
+    await conversationItem(page, "Second question").click();
+    await page.locator(".user-message", { hasText: "Second question" }).waitFor();
+    await sendHeld(page, "First question", [
+      { type: "data-research", id: "research", data: { phase: "searching", queries: ["q"], sources: [], demo: false, engine: "kernel", steps: ["Selected Kernel"] } },
+      ...writeText("First answer, "),
+    ]);
+    await conversationItem(page, "First question").click();
+    await page.locator(".answer-body", { hasText: "First answer," }).waitFor({ timeout: 5000 });
+    const midway = await page.locator(".assistant-message").innerText();
+    check("  and, mid-answer, its research and words so far", !/Research stopped/.test(midway) &&
+      (await page.locator(".agent-activity").count()) === 1 && (await page.getByRole("button", { name: "Stop research" }).isVisible()), midway);
+
+    await page.getByRole("button", { name: "Close sidebar" }).click();
+    await page.waitForTimeout(450);
+    const railRunning = page.locator(".sidebar-rail").getByRole("button", { name: /^Still answering: / });
+    check("the folded rail shows a spinner button for each running answer", (await railRunning.count()) === 2,
+      JSON.stringify(await railRunning.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")))));
+    await shot(page, "answering-rail");
+    await page.getByRole("button", { name: "Still answering: Second question" }).click();
+    const opened = await page.locator(".user-message", { hasText: "Second question" }).waitFor({ timeout: 5000 }).then(() => true, () => false);
+    check("  a rail spinner button opens its conversation", opened);
+    await sendHeld(page, "First question", [
+      { type: "text-delta", id: "a", delta: "written while you were away." },
+      { type: "data-research", id: "research", data: { phase: "complete", queries: ["q"], sources: [], demo: false, engine: "kernel", steps: ["Selected Kernel"] } },
+      ...finishText,
+    ], true);
+    const leftRail = await page.getByRole("button", { name: "Still answering: First question" })
+      .waitFor({ state: "detached", timeout: 5000 }).then(() => true, () => false);
+    check("  an answer that finishes leaves the rail", leftRail && (await railRunning.count()) === 1);
+    await sendHeld(page, "Second question", [...writeText("Second answer."), ...finishText], true);
+    await page.waitForSelector(".answer-actions", { timeout: 5000 });
+    check("  the answer on screen finishes there", (await page.locator(".assistant-message").count()) === 1 &&
+      /Second answer\./.test(await page.locator(".answer-body").innerText()) && (await railRunning.count()) === 0);
+
+    await page.getByRole("button", { name: "Open sidebar" }).click();
+    await page.waitForTimeout(450);
+    check("the spinners go once the answers are done", (await running()) === 0, `${await running()} spinners`);
+    await conversationItem(page, "First question").click();
+    await page.locator(".user-message", { hasText: "First question" }).waitFor();
+    await page.waitForSelector(".answer-actions", { timeout: 5000 });
+    const answers = await page.locator(".assistant-message").allInnerTexts();
+    check("the answer that finished off screen is there once, complete",
+      answers.length === 1 && /First answer, written while you were away\./.test(answers[0]) &&
+        !/Research stopped/.test(answers[0]) && (await page.locator(".user-message").count()) === 1,
+      JSON.stringify(answers));
+    const stopped = await page.evaluate(() => Object.values(window.__answers).filter((a) => a.aborted).length);
+    check("  switching never stopped an answer", stopped === 0, `${stopped} stopped`);
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // A reload ends a running answer; the words written so far stay.
+    const { context, page, errors } = await openHeld();
+    const question = "What happens on a reload?";
+    await page.evaluate(() => {
+      const setItem = Storage.prototype.setItem;
+      window.__writes = {};
+      Storage.prototype.setItem = function (key, value) {
+        window.__writes[key] = (window.__writes[key] || 0) + 1;
+        return setItem.call(this, key, value);
+      };
+    });
+    await askHeld(page, question);
+    await sendHeld(page, question, writeText("The first half of an answer"));
+    await page.locator(".answer-body", { hasText: "The first half of an answer" }).waitFor({ timeout: 5000 });
+    await page.evaluate(() => (window.__writes = {}));
+    for (let i = 1; i <= 4; i++) {
+      await page.waitForTimeout(600);
+      await sendHeld(page, question, [{ type: "text-delta", id: "a", delta: `, part ${i}` }]);
+    }
+    const writes = await page.evaluate(() => window.__writes);
+    check("an answer that streams is saved on its own each second, without rewriting the whole history",
+      !writes["scout-threads-v1"] && writes["scout-drafts-v1"] >= 2, JSON.stringify(writes));
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+    await conversationItem(page, question).click();
+    const kept = await page.locator(".answer-body", { hasText: "The first half of an answer, part 1, part 2, part 3, part 4" })
+      .waitFor({ timeout: 5000 }).then(() => true, () => false);
+    check("a reload mid-answer keeps the words written so far", kept && (await page.locator(".assistant-message").count()) === 1,
+      await page.locator(".conversation").innerText());
+    const storage = await page.evaluate(() => ({
+      history: localStorage.getItem("scout-threads-v1") || "", drafts: localStorage.getItem("scout-drafts-v1"),
+    }));
+    check("  and moves them into the saved history", storage.history.includes("part 4") && storage.drafts === null, JSON.stringify(storage.drafts));
+    check("  and shows no spinner, since the reload ended it", (await page.locator('.scout-sidebar [aria-label="Still answering"]').count()) === 0);
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // Stop ends only the answer on screen. Deleting a conversation stops its answer, and it does not come back.
+    const { context, page, errors } = await openHeld();
+    await askHeld(page, "Keep this one running");
+    await page.getByRole("button", { name: /New conversation/ }).click();
+    await askHeld(page, "Stop this one");
+    await page.getByRole("button", { name: "Stop research" }).click();
+    const stoppedHere = await page.waitForFunction(() => window.__answers["Stop this one"].aborted, null, { timeout: 5000 }).then(() => true, () => false);
+    check("Stop ends the answer on screen, and only that one",
+      stoppedHere && !(await answering(page, "Stop this one").isVisible()) &&
+        (await answering(page, "Keep this one running").isVisible()) &&
+        !(await page.evaluate(() => window.__answers["Keep this one running"].aborted)));
+    const question = "Delete this one";
+    await page.getByRole("button", { name: /New conversation/ }).click();
+    await askHeld(page, question);
+    await page.keyboard.press("Control+k");
+    await page.getByRole("button", { name: `Delete ${question}` }).click();
+    await page.keyboard.press("Escape");
+    const aborted = await page.waitForFunction((q) => window.__answers[q].aborted, question, { timeout: 5000 }).then(() => true, () => false);
+    await page.waitForTimeout(1500);
+    const stored = await page.evaluate(() => (localStorage.getItem("scout-threads-v1") || "") + (localStorage.getItem("scout-drafts-v1") || ""));
+    check("deleting a conversation with a running answer stops the answer",
+      aborted && (await conversationItem(page, question).count()) === 0 && !stored.includes(question),
+      JSON.stringify({ aborted, stored: stored.slice(0, 120) }));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // Many answers at once on a short window, and Try again in an older conversation.
+    const { context, page, errors } = await openHeld({ viewport: { width: 1280, height: 600 } });
+    const listed = page.locator(".nav-section .history-item");
+    const older = "A long research question";
+    await askHeld(page, older);
+    const others = Array.from({ length: 8 }, (_, i) => `Another question ${i + 1}`);
+    for (const question of others) {
+      await page.getByRole("button", { name: /New conversation/ }).click();
+      await askHeld(page, question);
+    }
+    check("a running answer below the first 8 conversations still shows in the list, with its spinner",
+      (await listed.count()) === 9 && (await answering(page, older).isVisible()), JSON.stringify(await listed.allInnerTexts()));
+
+    await page.getByRole("button", { name: "Close sidebar" }).click();
+    await page.waitForTimeout(450);
+    const rail = page.locator(".sidebar-rail");
+    const railRunning = rail.getByRole("button", { name: /^Still answering: / });
+    const settings = await rail.getByRole("button", { name: "Workspace settings" }).boundingBox();
+    await railRunning.last().scrollIntoViewIfNeeded();
+    const lastRunning = await railRunning.last().boundingBox();
+    check("on a short window, the folded rail keeps Workspace settings on screen and scrolls its running answers",
+      (await railRunning.count()) === 9 && settings && settings.y + settings.height <= 600 &&
+        lastRunning && lastRunning.y >= 0 && lastRunning.y + lastRunning.height <= settings.y,
+      JSON.stringify({ count: await railRunning.count(), settings, lastRunning }));
+    await shot(page, "answering-rail-short");
+    await page.getByRole("button", { name: "Open sidebar" }).click();
+    await page.waitForTimeout(450);
+
+    for (const question of others) await sendHeld(page, question, [...writeText("Done."), ...finishText], true);
+    await sendHeld(page, older, [{ type: "error", errorText: "The research engine stopped responding." }], true);
+    await answering(page, older).waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
+    const belowTheList = (await listed.count()) === 8 && (await conversationItem(page, older).count()) === 0;
+    await page.keyboard.press("Control+k");
+    await page.locator(".history-dialog-item button", { hasText: older }).click();
+    await page.evaluate((q) => (window.__answers[q].old = true), older);
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.waitForFunction((q) => !window.__answers[q].old, older);
+    await page.getByRole("button", { name: /New conversation/ }).click();
+    await page.waitForSelector(".suggestion-chip");
+    const top = listed.first();
+    check("Try again in an older conversation moves it to the top of the list, with a spinner while it runs",
+      belowTheList && (await top.innerText()).includes(older) &&
+        (await top.getByRole("img", { name: "Still answering" }).isVisible()),
+      JSON.stringify({ belowTheList, listed: await listed.allInnerTexts() }));
+    await sendHeld(page, older, [...writeText("Found it."), ...finishText], true);
+    const done = await top.getByRole("img", { name: "Still answering" })
+      .waitFor({ state: "detached", timeout: 5000 }).then(() => true, () => false);
+    check("  and it stays there once the answer is done", done && (await top.innerText()).includes(older));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // When the browser cannot save, one message says so, not one every few seconds.
+    const { context, page, errors } = await openHeld();
+    await page.evaluate(() => {
+      const setItem = Storage.prototype.setItem;
+      window.__storageFull = true;
+      Storage.prototype.setItem = function (key, value) {
+        if (window.__storageFull && key.startsWith("scout-")) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+        return setItem.call(this, key, value);
+      };
+      window.__saveToasts = 0;
+      let shown = false;
+      setInterval(() => {
+        const now = [...document.querySelectorAll("[data-sonner-toast]")]
+          .some((el) => el.dataset.removed !== "true" && /could not save/.test(el.textContent));
+        if (now && !shown) window.__saveToasts++;
+        shown = now;
+      }, 50);
+    });
+    const question = "A long answer on a full device";
+    const more = (text) => sendHeld(page, question, [{ type: "text-delta", id: "a", delta: text }]);
+    await askHeld(page, question);
+    await sendHeld(page, question, writeText("Words"));
+    // Research runs a while with nothing new to save, and the message closes on its own.
+    await page.waitForTimeout(6000);
+    for (let i = 0; i < 4; i++) {
+      await more(` ${i}`);
+      await page.waitForTimeout(450);
+    }
+    const whileFull = await page.evaluate(() => window.__saveToasts);
+    check("when the browser cannot save, it says so once while an answer streams", whileFull === 1, `${whileFull} messages`);
+    await page.evaluate(() => (window.__storageFull = false));
+    await sendHeld(page, question, finishText, true);
+    await page.waitForSelector(".answer-actions", { timeout: 5000 });
+    await page.waitForTimeout(300);
+    await page.evaluate(() => (window.__storageFull = true));
+    await askHeld(page, "And a follow-up on a full device");
+    await page.waitForTimeout(500);
+    const again = await page.evaluate(() => window.__saveToasts);
+    check("  and again when saving fails after it has worked", again === 2, `${again} messages`);
+    await sendHeld(page, "And a follow-up on a full device", [...writeText("Done."), ...finishText], true);
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // Forgetting the access code stops every running answer, and keeps what each has written.
+    let locked = false;
+    const { context, page, errors } = await openHeld({
+      config: () => ({ ...LIVE_CONFIG, ...(locked ? { access: "required", modelConnected: false, searchConnected: false } : { access: "granted" }) }),
+    });
+    await askHeld(page, "First answer to stop");
+    await sendHeld(page, "First answer to stop", writeText("Half of the first answer"));
+    await page.getByRole("button", { name: /New conversation/ }).click();
+    await askHeld(page, "Second answer to stop");
+    locked = true;
+    await page.locator(".workspace-button").click();
+    await page.getByRole("button", { name: "Forget" }).click();
+    const gated = await page.getByRole("heading", { name: "Enter your access code" })
+      .waitFor({ timeout: 5000 }).then(() => true, () => false);
+    const stopped = await page.waitForFunction(() => Object.values(window.__answers).every((a) => a.aborted), null, { timeout: 5000 })
+      .then(() => true, () => false);
+    const stored = await page.evaluate(() => localStorage.getItem("scout-threads-v1") || "");
+    check("Forget access code stops every running answer and keeps the words written so far",
+      gated && stopped && stored.includes("Half of the first answer") && stored.includes("Second answer to stop"),
+      JSON.stringify({ gated, stopped, stored: stored.slice(0, 160) }));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
     await context.close();
   }
   {

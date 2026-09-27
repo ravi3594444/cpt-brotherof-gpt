@@ -304,6 +304,31 @@ html[data-scout-sidebar="collapsed"] .scout-app {
 .rail-open:is(:hover, :focus-visible) .rail-open-icon {
   display: block;
 }
+/* A conversation whose answer is still running. */
+.rail-running {
+  color: var(--primary);
+}
+.rail-running[aria-current="page"] {
+  background: #242728;
+}
+/* More running answers than fit scroll here, so Workspace settings stays on screen.
+   The padding keeps focus rings inside the scroll box. */
+.rail-running-list {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3d453a transparent;
+  padding: 4px 0;
+  margin: -4px 0;
+}
+.rail-running-list:empty {
+  display: none;
+}
 .rail-settings {
   margin-top: auto;
 }

@@ -1,5 +1,6 @@
 "use client";
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useSyncExternalStore } from "react";
+import { flushSync } from "react-dom";
 import { nanoid } from "nanoid";
 import { Chat, useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type FileUIPart } from "ai";
@@ -97,6 +98,8 @@ import { capThinking, MAX_PHOTOS, requestTurns, withoutOlderThinking } from "@/l
 import { ACCESS_HEADER } from "@/lib/access";
 import { historyPhotoUrl, preparePhoto } from "@/lib/photos";
 import { SIDEBAR_BOOT_ATTRIBUTE, readSidebarOpen, saveSidebarOpen } from "@/lib/sidebar";
+import { createChatRegistry, type ChatRegistry, type SaveInfo } from "@/lib/chat-registry";
+import { applyDrafts, pendingDrafts, readDrafts, type Drafts } from "@/lib/history-drafts";
 import {
   DEMO_QUESTION,
   PHOTO_SAMPLE,
@@ -113,6 +116,32 @@ import {
 } from "@/lib/chat-types";
 
 const STORAGE_KEY = "scout-threads-v1";
+// Answers still being written, saved apart from the history (see lib/history-drafts.ts).
+const DRAFTS_KEY = "scout-drafts-v1";
+let drafts: Drafts<ScoutMessage> = {};
+// Answers save as they stream, so saving that keeps failing is shown once, not every second.
+const failingKeys = new Set<string>();
+function write(key: string, value?: unknown) {
+  if (value === undefined) localStorage.removeItem(key);
+  else localStorage.setItem(key, JSON.stringify(value));
+}
+function store(key: string, value?: unknown, smaller?: () => unknown) {
+  try {
+    try {
+      write(key, value);
+    } catch (error) {
+      if (!smaller) throw error;
+      // Out of room: a smaller copy still saves.
+      write(key, smaller());
+    }
+    failingKeys.delete(key);
+    return true;
+  } catch {
+    if (!failingKeys.size) toast.error("Your browser could not save this conversation.");
+    failingKeys.add(key);
+    return false;
+  }
+}
 // Show every source as a card, up to the most any research engine returns.
 const MAX_SOURCE_CARDS = 8;
 type Suggestion = (typeof SUGGESTIONS)[number] | typeof PHOTO_SAMPLE;
@@ -280,20 +309,25 @@ export default function Home() {
   useEffect(() => {
     try {
       const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-      if (Array.isArray(raw))
+      if (Array.isArray(raw)) {
+        drafts = readDrafts(localStorage.getItem(DRAFTS_KEY));
         // Device-local history loads after hydration: reading localStorage while
         // rendering would make the first client render differ from the server HTML.
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setThreads(
-          raw
-            .filter(
-              (t) =>
-                typeof t.id === "string" &&
-                typeof t.title === "string" &&
-                Array.isArray(t.messages),
-            )
-            .slice(0, 30),
+          applyDrafts(
+            raw
+              .filter(
+                (t) =>
+                  typeof t.id === "string" &&
+                  typeof t.title === "string" &&
+                  Array.isArray(t.messages),
+              )
+              .slice(0, 30),
+            drafts,
+          ),
         );
+      }
     } catch {
       /* local storage can be disabled */
     }
@@ -311,18 +345,13 @@ export default function Home() {
     saveSidebarOpen(open);
   }, []);
   useEffect(() => {
-    if (loaded) {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(threads));
-      } catch {
-        try {
-          // Out of room: older conversations give up their thinking so this one still saves.
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(withoutOlderThinking(threads)));
-        } catch {
-          toast.error("Your browser could not save this conversation.");
-        }
-      }
-    }
+    // Out of room: older conversations give up their thinking so this one still saves.
+    if (!loaded || !store(STORAGE_KEY, threads, () => withoutOlderThinking(threads))) return;
+    // Drafts the history now holds are done with.
+    const pending = pendingDrafts(threads, drafts);
+    if (Object.keys(pending).length === Object.keys(drafts).length) return;
+    drafts = pending;
+    store(DRAFTS_KEY, Object.keys(pending).length ? pending : undefined);
   }, [threads, loaded]);
   const newChat = useCallback((prompt = "") => {
     setInitialPrompt(prompt);
@@ -334,7 +363,7 @@ export default function Home() {
     setActiveId(id);
     setHistoryOpen(false);
   };
-  const saveThread = useCallback((id: string, messages: ScoutMessage[]) => {
+  const saveThread = useCallback((id: string, messages: ScoutMessage[], { started, running }: SaveInfo) => {
     if (!messages.length) return;
     const title = messageText(
       messages.find((m) => m.role === "user") || messages[0],
@@ -343,14 +372,37 @@ export default function Home() {
       ...m,
       parts: m.parts.map((p) => (p.type === "file" ? { ...p, url: historyPhotoUrl(p.url) } : p)),
     }));
-    setThreads((prev) =>
-      [
-        { id, title, messages: stored, updatedAt: Date.now() },
-        ...prev.filter((t) => t.id !== id),
-      ].slice(0, 30),
-    );
+    const updatedAt = Date.now();
+    // An answer still being written saves as a draft; the history is written when it starts and ends.
+    if (running && !started) {
+      drafts = { ...drafts, [id]: { updatedAt, messages: stored } };
+      store(DRAFTS_KEY, drafts);
+      return;
+    }
+    setThreads((prev) => {
+      const thread = { id, title, messages: stored, updatedAt };
+      // Starting an answer moves its conversation to the top; more of an answer keeps it in place.
+      if (!started && prev.some((t) => t.id === id)) return prev.map((t) => (t.id === id ? thread : t));
+      return [thread, ...prev.filter((t) => t.id !== id)].slice(0, 30);
+    });
   }, []);
+  // Each conversation's Chat lives here, not in its view, so answers keep running
+  // when another conversation is on screen.
+  const [chats] = useState(() => createChatRegistry<ScoutMessage, Chat<ScoutMessage>>({ save: saveThread }));
+  const running = useSyncExternalStore(chats.subscribe, chats.running, chats.running);
+  useEffect(() => {
+    // A reload or a closed app ends every running answer; keep what each has written.
+    const keep = () => flushSync(() => chats.flush());
+    const hidden = () => document.visibilityState === "hidden" && keep();
+    window.addEventListener("pagehide", keep);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      window.removeEventListener("pagehide", keep);
+      document.removeEventListener("visibilitychange", hidden);
+    };
+  }, [chats]);
   const removeThread = (thread: LocalThread) => {
+    chats.remove(thread.id);
     setThreads((prev) => prev.filter((t) => t.id !== thread.id));
     if (activeId === thread.id) newChat();
     toast("Conversation removed", {
@@ -387,6 +439,7 @@ export default function Home() {
     return false;
   }, []);
   const forgetAccess = async () => {
+    chats.stopAll();
     rememberAccessCode("");
     setSettingsOpen(false);
     const data = await fetchConfig("");
@@ -411,6 +464,7 @@ export default function Home() {
     >
       <AppSidebar
         threads={threads}
+        running={running}
         activeId={activeId}
         onNew={() => newChat()}
         onHistory={() => setHistoryOpen(true)}
@@ -424,7 +478,7 @@ export default function Home() {
         initialMessages={threads.find((t) => t.id === activeId)?.messages || []}
         initialPrompt={initialPrompt}
         config={config}
-        onSave={saveThread}
+        chats={chats}
         onSettings={() => setSettingsOpen(true)}
         onNew={() => newChat()}
       />
@@ -582,6 +636,7 @@ export default function Home() {
 
 function AppSidebar({
   threads,
+  running,
   activeId,
   onNew,
   onHistory,
@@ -590,6 +645,7 @@ function AppSidebar({
   onSettings,
 }: {
   threads: LocalThread[];
+  running: readonly string[];
   activeId: string;
   onNew: () => void;
   onHistory: () => void;
@@ -665,7 +721,7 @@ function AppSidebar({
           {threads.length === 0 ? (
             <p className="sidebar-note">A fresh space for your next idea.</p>
           ) : (
-            threads.slice(0, 8).map((t) => (
+            threads.filter((t, i) => i < 8 || running.includes(t.id)).map((t) => (
               <button
                 className={`history-item ${t.id === activeId ? "selected" : ""}`}
                 key={t.id}
@@ -673,6 +729,9 @@ function AppSidebar({
               >
                 <MessageSquare size={14} className="shrink-0" />
                 <span>{t.title}</span>
+                {running.includes(t.id) && (
+                  <LoaderCircle size={14} className="spin shrink-0 ml-auto text-primary" role="img" aria-label="Still answering" />
+                )}
               </button>
             ))
           )}
@@ -713,6 +772,21 @@ function AppSidebar({
         <SideIconButton label="Explore a research example" className="rail-button" onClick={onDemo}>
           <BookOpen size={19} />
         </SideIconButton>
+        <div className="rail-running-list">
+          {threads
+            .filter((t) => running.includes(t.id))
+            .map((t) => (
+              <SideIconButton
+                key={t.id}
+                label={`Still answering: ${t.title}`}
+                className="rail-button rail-running"
+                aria-current={t.id === activeId ? "page" : undefined}
+                onClick={() => onSelect(t.id)}
+              >
+                <LoaderCircle size={18} className="spin" />
+              </SideIconButton>
+            ))}
+        </div>
         <SideIconButton label="Workspace settings" className="rail-button rail-settings" onClick={onSettings}>
           <span className="avatar">S</span>
         </SideIconButton>
@@ -743,7 +817,7 @@ function ChatWorkspace({
   initialMessages,
   initialPrompt,
   config,
-  onSave,
+  chats,
   onSettings,
   onNew,
 }: {
@@ -751,7 +825,7 @@ function ChatWorkspace({
   initialMessages: ScoutMessage[];
   initialPrompt: string;
   config: ScoutConfig;
-  onSave: (id: string, m: ScoutMessage[]) => void;
+  chats: ChatRegistry<Chat<ScoutMessage>>;
   onSettings: () => void;
   onNew: () => void;
 }) {
@@ -766,8 +840,9 @@ function ChatWorkspace({
   const [readerOpen, setReaderOpen] = useState(false);
   const [readerSources, setReaderSources] = useState<ResearchSource[]>([]);
   const [copied, setCopied] = useState("");
-  const [chat] = useState(
-    () =>
+  // The Chat outlives this view, so switching conversations leaves its answer running.
+  const [chat] = useState(() =>
+    chats.get(id, () =>
       new Chat<ScoutMessage>({
         id,
         messages: initialMessages,
@@ -782,24 +857,14 @@ function ChatWorkspace({
           }),
         }),
       }),
+    ),
   );
   const { messages, sendMessage, regenerate, status, stop, error, clearError } =
     useChat<ScoutMessage>({ chat });
   const busy = status === "submitted" || status === "streaming";
   const requestBody = { webEnabled, preview, engine };
   const sentInitial = useRef(false);
-  useEffect(() => {
-    if (messages.length && (status === "ready" || status === "error"))
-      onSave(id, messages);
-  }, [messages, status, id, onSave]);
-  useEffect(
-    () => () => {
-      const wasBusy = chat.status === "submitted" || chat.status === "streaming";
-      void chat.stop();
-      if (chat.messages.length && wasBusy) onSave(id, chat.messages);
-    },
-    [chat, id, onSave],
-  );
+  useEffect(() => chats.show(id), [chats, id]);
   const submit = useCallback(
     async (text: string, options: { webEnabled?: boolean; files?: FileUIPart[] } = {}) => {
       const clean = text.trim();
