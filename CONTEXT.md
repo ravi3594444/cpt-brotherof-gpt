@@ -7,12 +7,14 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 | Term | Meaning | Avoid saying |
 | --- | --- | --- |
 | Question | The latest user message Scout is answering, 1 to 6000 characters. | prompt, query |
-| Conversation | A user's questions and Scout's answers, kept on the device. | thread, chat (in UI copy) |
+| Conversation | A user's questions and Scout's answers, kept on the device. Its Answer keeps running while another Conversation is on screen. | thread, chat (in UI copy) |
 | Answer | Scout's reply to a Question, written by the Answer model. | response, completion |
 | Answer model | The OpenAI-compatible model that writes Answers, and decides whether a Question needs Research by calling the Research tool. Shown as "AI model". | LLM, JEV |
 | Research | Gathering Sources with a Research engine for the task the Answer model gave the Research tool, before the Answer is written. | search (when a browser does it) |
 | Research tool | The `web_research` tool the Answer model calls when a Question needs Research. The Answer model decides; Scout has no rules of its own for it. | search tool, auto-research |
 | Research engine | The service that gathers Sources: Browser Use Cloud, Kernel, or the Search API. | browser (for the Search API) |
+| Research budget | The time Research may take for one Question: it ends 200 seconds after the request starts (a second try, 220), so the Answer has time before the 280-second ceiling. A Research engine that needs more time than is left does not open its browser. | timeout |
+| Partial result | The pages a browser agent had reached when it ran out of time or stopped early, kept as Sources that are not Read, with a warning. | partial answer |
 | Auto | The Research engine setting that lets Scout choose the engine. | default engine |
 | Browser Use Cloud | A hosted browser agent that navigates sites and returns page summaries. | Browser Use session (for Kernel) |
 | Kernel | A separate hosted cloud browser that runs Scout's fixed page-reading script. | Browser Use |
@@ -22,9 +24,10 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 | JEV | TypeSafe's hosted choice model, reached through AI/ML API or TypeSafe. In Auto, it picks Kernel or Browser Use Cloud. It never answers or browses. | router model, on-device model |
 | Source | A validated public web page used as evidence: title, URL, content, and optionally an image. | result, link |
 | Read | True for a Source only when its content is page text a Research engine read directly. Search excerpts and browser-agent summaries are not Read. | verified |
-| Evidence | The Sources given to the Answer model, marked as page content, search excerpt, or agent observation. | context |
+| Evidence | The Sources given to the Answer model, marked as page content, search excerpt, or agent observation, with the Research engine's warning, such as a Partial result's. | context |
 | Citation | A numbered link in an Answer, like [1](url), that points to one of the Question's Sources. | footnote, reference |
-| Research steps | The visible log of actions the server actually took. They are not the model's reasoning. | thoughts, chain of thought |
+| Research steps | The visible log of actions the server actually took. They are not the model's reasoning; that is Thinking. | thoughts, chain of thought |
+| Thinking | The Answer model's own reasoning before it writes, as its provider returns it (or a leading `<think>` block in its text). Shown as one collapsed row, "Thinking…" then "Thought for N s", that opens to plain text. Not Research steps, which stay the server's actions. | chain of thought, reasoning (in UI copy) |
 | Sample mode | Prepared Answers and Sources that show the interface. It never browses or calls a model. | demo mode, preview |
 | Live chat | The Answer model with Search the web off or no Research engine connected. It gives no Citations. | chat mode |
 | Search the web | The composer switch that gives the Answer model the Research tool. Off means no tool, so no Research. | web mode |
@@ -40,18 +43,21 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 ## Relationships
 
 - A **Conversation** holds Questions and Answers in order.
-- An **Answer** has at most one **Research** record: its phase, **Research steps**, **Sources**, engine, and any warning.
-- With **Search the web** on, the **Answer model** has the **Research tool** and calls it at most once per **Question**, only when the Question needs Research. An Answer it writes without the tool has no Research record and no **Citations**.
+- An **Answer** has at most one **Research** record: its phase, the **Research steps** of every try in order, **Sources**, engine, and any warning.
+- With **Search the web** on, the **Answer model** has the **Research tool** and calls it once per **Question**, only when the Question needs Research. It may call it once more only when that Research failed or found no Sources, at least 90 seconds of the ceiling remain, and the failure would not repeat (a rejected key, no credit, a rate limit, or a Browser Use Cloud run that may still be going); a third call never runs. An Answer it writes without the tool has no Research record and no **Citations**.
 - When the provider cannot take tools, the **Answer model** makes the same choice as a one-word reply (RESEARCH or ANSWER); an unclear reply means Research.
 - A **Citation** number n refers to the n-th **Source** of the same Answer's Research.
+- An **Answer** can have **Thinking** from before and after the Research tool call; it shows as one row, above the Research panel when the model thought before researching. Thinking is kept on the device, up to 20,000 characters per Answer (older Conversations give theirs up first when the device runs out of room), and never sent back to the **Answer model**.
 - **Auto** asks **JEV** only when Browser Use Cloud, Kernel, and the JEV key are all connected. With one browser connected, Auto uses it. With none, it uses the **Search API**.
-- **Browser Use Cloud** Sources are never **Read**; **Kernel** page text is Read; **Search API** Sources are Read only after page extraction succeeds.
+- **Browser Use Cloud** Sources, including **Partial results**, are never **Read**; **Kernel** page text is Read; **Search API** Sources are Read only after page extraction succeeds.
 
 ## States and lifecycles
 
-- **Research phase**: searching → reading → writing → complete. It shows "Research stopped" if the request ends before complete, or if Research fails; the Answer model then says it failed.
-- **Browser Use Cloud run**: queued → dispatching → running → completed, failed, or cancelled.
+- **Research phase**: searching → reading → writing → complete. When Research fails and the Answer model is told why, it shows "Research incomplete" with the reason from then on, also while the Answer model decides whether to try again, and the Answer model says what happened. It shows "Research stopped" if the request is cut off or cancelled before complete.
+- **Browser Use Cloud run**: queued → dispatching → running → completed, failed, or cancelled. Scout polls its status until the **Research budget** ends, then keeps the pages the agent reached as **Partial results** and cancels the run. After every run Scout stops its cloud browser.
 - **Sample mode**: on until a Research engine is connected; the Sample switch overrides it for the current Conversation.
+- **Thinking**: "Thinking…" with a live seconds count while a thought streams → "Thought for N s" when done. It shows "Thinking stopped" if the Answer ends mid-thought. Before the first part of an Answer arrives, the waiting line says "Thinking…" and adds the seconds after 3.
+- **Answer run**: an Answer runs until it finishes, fails, or Stop ends it. Starting one, with a new Question or Try again, moves its Conversation to the top of the list. Opening another Conversation or a new one leaves it running, with a spinner on its Conversation in the sidebar and the folded rail; several can run at once. Deleting its Conversation, or forgetting the Access code, stops it. What it has written is saved about once a second as it streams, so a reload keeps the words so far, though the reload ends the Answer.
 
 ## Ambiguities
 

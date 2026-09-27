@@ -304,6 +304,31 @@ html[data-scout-sidebar="collapsed"] .scout-app {
 .rail-open:is(:hover, :focus-visible) .rail-open-icon {
   display: block;
 }
+/* A conversation whose answer is still running. */
+.rail-running {
+  color: var(--primary);
+}
+.rail-running[aria-current="page"] {
+  background: #242728;
+}
+/* More running answers than fit scroll here, so Workspace settings stays on screen.
+   The padding keeps focus rings inside the scroll box. */
+.rail-running-list {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3d453a transparent;
+  padding: 4px 0;
+  margin: -4px 0;
+}
+.rail-running-list:empty {
+  display: none;
+}
 .rail-settings {
   margin-top: auto;
 }
@@ -745,6 +770,12 @@ h1 {
 .agent-activity.open .trailing {
   transform: rotate(90deg);
 }
+.activity-warning {
+  padding: 7px 14px 0 35px;
+  color: #aab9a1;
+  font-size: 12px;
+  line-height: 1.4;
+}
 .agent-steps {
   padding: 11px 14px 2px 35px;
   display: grid;
@@ -762,6 +793,88 @@ h1 {
   color: #c9dda2;
   margin-top: 1px;
   flex: none;
+}
+/* A research try that did not finish: muted, and in the same 13px column as the checks. */
+.agent-steps svg.step-failed {
+  color: #7f9470;
+  margin: 2px 1px 0;
+}
+/* The Answer model's Thinking: one quiet row that opens to its plain-text thoughts. */
+.thinking {
+  margin-bottom: 12px;
+  min-width: 0;
+}
+.thinking-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 36px;
+  padding: 6px 2px;
+  border-radius: 8px;
+  color: #a9b89e;
+  font-size: 13px;
+  text-align: left;
+}
+.thinking-line:hover .thinking-label:not(.thinking-shimmer) {
+  color: #d5e3c6;
+}
+.thinking-label {
+  font-weight: 500;
+  white-space: nowrap;
+}
+.thinking-time,
+.progress-time {
+  color: #7f9470;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.thinking-line .trailing {
+  transition: transform 0.2s;
+}
+.thinking.open .trailing {
+  transform: rotate(90deg);
+}
+.thinking-text {
+  max-height: min(320px, 45vh);
+  margin: 4px 0 2px 2px;
+  padding: 2px 10px 2px 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-left: 2px solid #333a30;
+  color: #8e9a88;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.thinking-text:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.thinking-shimmer {
+  background: linear-gradient(90deg, #8a9884 0%, #8a9884 38%, #e6efd9 50%, #8a9884 62%, #8a9884 100%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: thinking-shimmer 2.2s linear infinite;
+}
+@keyframes thinking-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thinking-shimmer {
+    animation: none;
+    background: none;
+    color: #c4d7b1;
+  }
 }
 .source-cards {
   /* One row of every source that swipes sideways; kept off the screen edge so

@@ -23,12 +23,31 @@ Keys are server-side environment variables.
    asks it to research, search, find, look up, compare or check something, or
    when a good answer needs current or verifiable facts; otherwise it answers
    directly and the stream has no research parts. Scout adds no rules of its
-   own to that decision. Research runs at most once per message: a second call
-   gets an error result, and the step after the tool cannot call it
-   (`toolChoice: "none"`, `stopWhen: stepCountIs(2)`). That step still
-   defines the tool, because some providers reject a tool call and result
-   sent without one. If research fails, the model gets `{ error }` and says
-   so, and the research record keeps the warning. The answer model should
+   own to that decision. Research runs once per message, with one retry at
+   most. If it fails (or finds no sources), the model gets
+   `{ error, canRetry, secondsLeft, retry }`: why it failed, the seconds left
+   before the 280-second ceiling, and whether it may call the tool once more.
+   It may only when at least 90 seconds remain and the failure would not
+   simply repeat: a rejected key, no credit, a rate limit (HTTP 401, 402,
+   403, 429), or a Browser Use run whose creation got no answer and may
+   still be running are not retried. The retry must end 220 seconds into the
+   request, leaving the answer 60. Otherwise, and after any
+   successful research or a second call, the next step cannot call the tool
+   (`toolChoice: "none"`) and the loop stops after it (at most three steps),
+   so a third call never runs; a call while research is running, or after it
+   succeeded, gets an error result. That step still defines the tool,
+   because some providers reject a tool call and result sent without one.
+   The system prompt forbids promising later work ("let me try again", "I
+   will search") unless the model calls the tool in the same reply; when
+   research failed for good, the model says in one sentence what happened,
+   gives what it knows with a clear caveat that it is not from sources, and
+   suggests how to narrow the question. The research record keeps both
+   tries' steps in order, the successful try's sources, and the warning, and
+   marks a failed research the model was told about (`failed: true`), which
+   the panel shows as "Research incomplete", also while the model decides
+   whether to try again or writes the answer. Each failed try adds the step
+   "Research did not finish: <reason>", shown without a check mark. The
+   answer model should
    support OpenAI-style tool calling. When the first call is rejected with
    HTTP 400, 404, or 422 about tools or functions (a context-length error
    does not count), Scout asks the same model in plain text for one word,
@@ -40,6 +59,10 @@ Keys are server-side environment variables.
    wins. Auto uses JEV to choose between Kernel and Browser Use Cloud when
    both and a JEV key (AI/ML API or TypeSafe) are available; low confidence or a JEV failure
    chooses Browser Use Cloud. With just one browser key, that engine runs.
+   Auto leaves out an engine that needs more time than research has left
+   (Browser Use Cloud 60 seconds, the vision agent 45, Kernel 20), which
+   matters for a late retry; each engine also refuses to open a paid browser
+   with less than its minimum, including when chosen explicitly.
    The older Tavily adapter remains available as a compatibility fallback.
 5. Browser Use Cloud runs its own browser agent. Kernel creates an entirely
    separate cloud browser and executes a fixed Playwright snippet for public
@@ -48,17 +71,63 @@ Keys are server-side environment variables.
 6. The server validates public source URLs, keeps up to six Browser Use
    sources or four Kernel pages, and returns the observed evidence to the
    answer model, numbered in order, as the tool result (in the plain-text
-   fallback, in its instructions). The model must cite exact supplied links;
+   fallback, in its instructions). When the engine gave a warning, such as a
+   partial result, the result is `{ warning, sources }` so the model knows;
+   a page reached with no text recorded is marked so the model does not
+   cite it for facts. The model must cite exact supplied links;
    source content is untrusted. The UI stream includes action steps, citations, and
    source cards with images when a page provides one.
-7. The route has a two-minute ceiling. Browser Use runs have a one-dollar
-   maximum cost per request and are cancelled if Scout stops polling. Kernel
-   sessions are deleted after use even on failure. Requests stop on client
-   cancellation.
+7. The route has a 280-second ceiling (`maxDuration` is 300). Research has a
+   budget: it must end 200 seconds after the request starts, so the answer
+   has the rest. `streamAnswer` passes that deadline to `webResearch` and on
+   to every engine, which also aborts any request still waiting 5 seconds
+   after it. Browser Use Cloud polls the run's status every 2 seconds until
+   8 seconds before the deadline (shopping sites often need 1 to 3 minutes),
+   each poll ending by then, and reads the full run once it completes.
+   Creating the run may take up to 30 seconds; with no answer by then, the
+   run may exist, so Scout does not start another. If time runs out, the run
+   fails, or status polls fail three times in a row, Scout reads the run's
+   events (up to five pages, following the cursor) and keeps up to six
+   public pages the agent reached, with their titles and the text it
+   extracted or noted there, as sources that are not read, with the warning
+   "The browser agent ran out of time; these are the pages it had reached"
+   (or "stopped early"). Search pages, Browser Use's own links, and signed
+   file links are left out. Only when nothing usable was reached does
+   research fail. Then Scout cancels a run it stopped polling and stops the
+   run's cloud browser (found in the `browser.ready` event, or by listing
+   the session's active browsers), in the background with 5-second
+   timeouts, after every run: a finished run does not stop its browser. That
+   cleanup, and closing Kernel sessions, is registered with `after()` from
+   `next/server`, which the route passes to `webResearch` (the platform's
+   `waitUntil` on Vercel and Cloudflare), so it still finishes when the user
+   stops the answer or the ceiling cuts it off.
+   Browser Use runs have a one-dollar maximum cost per request. Kernel fits
+   its script's `timeout_sec` into the time left and does not open a browser
+   with less than 20 seconds; its sessions are deleted after use even on
+   failure. The vision agent stops at its own budget or the deadline,
+   whichever comes first, keeps the pages it read, and does not open a
+   browser with less than 45 seconds. Requests stop on
+   client cancellation.
 
-This is an **observable workflow**, not a stream of private model reasoning.
+Research steps are an **observable workflow**, not the model's reasoning.
 Displayed steps are actions the server actually took, such as selecting a
 browser, opening a session, visiting pages, and collecting sources.
+
+The answer model's own reasoning is shown apart from them, as **Thinking**:
+the provider's `reasoning_content` (or `reasoning`), or `<think>` or
+`<thinking>` blocks (in any case) that open a step's text, streams as UI
+reasoning parts, one per thought, before and after a research call, in the
+plain-text fallback, and with Search the web off. A think tag later in an
+answer stays in the answer, and an empty thought shows nothing. Message
+metadata `thinkingMs` carries the finished thoughts' total time. The UI folds
+Thinking into one row ("Thinking…", then "Thought for N s") that opens to plain
+text and, while a thought streams, shows its newest line. It is never sent back
+to the model. Saved history keeps up to 20,000 characters of it per answer, and
+when the device runs out of room, older conversations give theirs up first.
+Because reasoning tokens count against the output limit on most providers, the
+answer allows 16,000 output tokens (4,096 for a model that turns that away) and
+the Search API query plan 1,500, with leading think blocks stripped before its
+JSON is read.
 
 ## Public app API
 
@@ -104,7 +173,7 @@ type ChatRequest = {
 
 Vision agent: with `KERNEL_API_KEY` and a vision model (`VISION_MODEL_ID`), the
 `vision_agent` engine opens a Kernel browser and runs up to 8 steps within 200
-seconds. Each step Scout sends the vision model the page's address, a numbered
+seconds, or until the research deadline if that is sooner. Each step Scout sends the vision model the page's address, a numbered
 list of its visible clickable elements and text fields, the start of its text,
 and a JPEG screenshot; the model replies with one JSON action (`open`, `click`,
 `type`, `scroll`, `back`, `read`, `finish`). Scout checks it (only listed
@@ -142,11 +211,13 @@ type ResearchData = {
   queries: string[];
   sources: ResearchSource[];
   engine?: "browser_use" | "kernel" | "vision_agent" | "tavily";
-  steps?: string[];     // observable action log, not hidden reasoning
-  warning?: string;
+  steps?: string[];     // observable action log of every try, not hidden reasoning
+  warning?: string;     // a partial result, or why research failed
+  failed?: boolean;     // research failed and the answer model was told why
   demo: boolean;
 };
-// Stream parts: data-research, source-url, text-start/delta/end, finish.
+// Stream parts: data-research, source-url, reasoning-start/delta/end,
+// message-metadata ({ thinkingMs }), text-start/delta/end, finish.
 // data-research and source-url appear only when the answer model researched.
 ```
 
@@ -160,7 +231,7 @@ fake product pictures.
 
 | Tool | Request | Response used by Scout | Key |
 | --- | --- | --- | --- |
-| Browser Use Cloud V4 | `POST https://api.browser-use.com/api/v4/runs` with `task`, `maxCostUsd: 1`, and an output schema for `sources[{url,title,summary,image?}]`; poll `GET /api/v4/runs/{id}`; cancel `POST /api/v4/runs/{id}/cancel` | completed run's structured `output.sources` or parseable `result` | `BROWSER_USE_API_KEY` in `X-Browser-Use-API-Key` |
+| Browser Use Cloud V4 | `POST https://api.browser-use.com/api/v4/runs` with `task`, `maxCostUsd: 1`, and an output schema for `sources[{url,title,summary,image?}]`; poll `GET /api/v4/runs/{id}/status`, then `GET /api/v4/runs/{id}` once; when it ends without a result, `GET /api/v4/runs/{id}/events?after=` (cursor `nextAfter`, while `hasMore`); cancel `POST /api/v4/runs/{id}/cancel`; stop the browser with `PATCH /api/v4/browsers/{id}` `{"action":"stop"}` (id from `browser.ready`'s `data.browser_session_id`, or `GET /api/v4/browsers?agentSessionId=`) | completed run's structured `output.sources` or parseable `result`; otherwise the pages its events reached | `BROWSER_USE_API_KEY` in `X-Browser-Use-API-Key` |
 | Kernel browser | `POST https://api.onkernel.com/browsers`; `POST /browsers/{id}/playwright/execute` with fixed `code` and `timeout_sec`; `DELETE /browsers/{id}` | Playwright's returned list `[{url,title,content,read,image?}]` | `KERNEL_API_KEY` as Bearer |
 | JEV | `POST https://api.aimlapi.com/v1/decisions` with `model: "typesafe/jev"` (AI/ML API), or `POST https://api.typesafe.ai/v1/systemone` with `model: "jev-latest"` (TypeSafe); both take `state` and a `choice` question between `kernel` and `browser_use` | `answers.route.choice` and `confidence`; Kernel requires confidence at least 0.65 | `AIMLAPI_API_KEY` or `TYPESAFE_API_KEY` as Bearer |
 | Answer model | OpenAI-compatible Chat Completions via Vercel AI SDK `streamText`, with OpenAI-style tool calling for `web_research` (plain-text RESEARCH/ANSWER fallback otherwise) | the research decision, then answer tokens grounded in validated source list | `MODEL_BASE_URL`, `MODEL_ID`, `MODEL_API_KEY` |

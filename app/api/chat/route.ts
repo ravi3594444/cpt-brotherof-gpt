@@ -1,5 +1,6 @@
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { after } from "next/server";
 import { z } from "zod";
 import { serverConfig } from "@/lib/server-config";
 import { ACCESS_HEADER, accessAllowed } from "@/lib/access";
@@ -57,6 +58,8 @@ const wait = (ms: number, signal: AbortSignal) =>
     signal.addEventListener("abort", abort, { once: true });
   });
 export async function POST(request: Request) {
+  // Research and the answer share the 280-second ceiling from here.
+  const startedAt = Date.now();
   const origin = request.headers.get("origin");
   if (origin && origin !== new URL(request.url).origin)
     return new Response("This request must come from your Scout workspace.", {
@@ -201,12 +204,14 @@ export async function POST(request: Request) {
         messages: answerMessages,
         question,
         webEnabled: input.webEnabled,
-        research: webResearch({ keys: config, engine: input.engine, model, conversation: answerMessages }),
+        // Closing cloud browsers outlives the response through the platform's waitUntil.
+        research: webResearch({ keys: config, engine: input.engine, model, conversation: answerMessages, keepAlive: after }),
         writer,
         modelName: config.modelName,
         photos,
         photosToModel,
         signal,
+        startedAt,
       });
     },
   });

@@ -48,13 +48,32 @@ check something, or when a good answer needs current facts. A greeting,
 writing, math or code gets a direct reply with no research and no citations.
 The answer model should support OpenAI-style tool calling. If the provider
 rejects tools, Scout asks the model in plain text whether to research (one
-word, RESEARCH or ANSWER) and then researches or answers directly. With
+word, RESEARCH or ANSWER) and then researches or answers directly.
+Research has a time budget: it ends 200 seconds into the request, so the
+answer has time before the 280-second ceiling. Browser Use Cloud gets that
+whole budget, since shopping sites often need one to three minutes. If it
+runs out of time or stops early, Scout keeps up to six pages the agent had
+reached as sources (not read, with a warning the model also gets) instead
+of failing, and it stops the Browser Use cloud browser after every run so it
+does not idle, even when the answer is stopped. No engine opens a paid
+browser without enough time left to use it.
+Research that fails quickly can be retried once, when at least 90 seconds
+remain and the failure would not simply repeat (a rejected key, no credit, a
+rate limit); the model is told why research failed and whether it may
+retry, and never promises a search it is not making. With
 Kernel and a vision model connected, the **Vision agent** engine lets the vision
 model drive a real Kernel browser (open, click, type into search boxes, scroll,
 read) for up to 8 steps while the answer model only writes the reply. JEV can
 choose it in Auto. For Atria Dawn Preview, use `MODEL_BASE_URL=https://api.atria-asi.ai/v1`
 and `MODEL_ID=Atria-Dawn-Preview`; Atria reads text only, so set a vision model
-for photos. The two
+for photos. Atria is a reasoning model: it thinks before its first word. Scout
+shows that thinking as a collapsed "Thinking…" row above the answer, and lets
+each answer use up to 16,000 output tokens, since thinking counts against the
+limit on most providers (Atria accepts up to 65,536). A model whose output cap
+is lower, which turns 16,000 away, gets the answer with 4,096. For a self-hosted
+reasoning model whose chat template opens the `<think>` block itself (DeepSeek
+R1 or QwQ on vLLM or SGLang), start the server with its reasoning parser so the
+thinking arrives as `reasoning_content`; otherwise it shows in the answer. The two
 browser keys together enable engine choice in the chat. JEV is optional and
 only selects the path in Auto mode. It does not browse, answer, or run locally
 on Android. The current private preview already has its answer model
@@ -69,6 +88,11 @@ cost ceiling, and Android integration boundary.
 
 `vercel.json` builds Scout as a standard Next.js app: it installs with pnpm
 11.25.0 (the version `pnpm-workspace.yaml` needs) and runs `next build`.
+
+Its functions run in Singapore (`sin1`), next to the Atria API (Alibaba Cloud
+`ap-southeast-1`), so every answer starts sooner. Kernel and Browser Use run
+in the US, so research steps take a little longer from there. If you use a
+different answer model, set `regions` to the Vercel region closest to it.
 
 1. In Vercel, import this GitHub repository. Keep the defaults; `vercel.json`
    sets the install and build commands.
@@ -101,7 +125,9 @@ pnpm build
 
 With `pnpm dev` running, `pnpm test:browser` drives sample mode in Chromium:
 the logo intro, the home screen, answers, citations, small talk without a
-research trail, a direct live answer, a six-source card row,
+research trail, a direct live answer, a live answer's Thinking row, stubbed
+research that ends "Research incomplete" (once, and after a retry) and one
+with partial results, a six-source card row,
 photos (attach, limit, shrink, thumbnails), history, Try again, the + menu and
 Web chip, a stubbed connected workspace, and the layout at desktop and phone
 sizes. It needs no
@@ -140,7 +166,12 @@ does not simulate those native permissions.
 ## Tests and current limits
 
 Mocked adapter tests verify Browser Use run parsing (including prose around
-JSON), image/source validation, Kernel session cleanup, engine choice and the
+JSON), polling to the research deadline on a fake clock, partial results
+from run events, cancelled runs and stopped browsers, Kernel and vision
+agent time limits, the minimum time before a paid browser opens, the
+one-retry research policy and failures that are not retried,
+image/source validation,
+Kernel session cleanup, engine choice and the
 logged JEV outcome, pasted-link extraction, conversation preparation, and
 legacy search error behavior. A
 TypeScript check and production build cover the UI and API. The provider

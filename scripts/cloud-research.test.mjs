@@ -19,8 +19,11 @@ const browserFetch = async (url, init) => {
     assert.equal(body.outputSchema.properties.sources.type, "array");
     return Response.json({ id: runId });
   }
+  if (url.endsWith("/status")) {
+    polls++;
+    return Response.json({ status: "completed" });
+  }
   assert.equal(url, `https://api.browser-use.com/api/v4/runs/${runId}`);
-  polls++;
   return Response.json({
     status: "completed",
     output: {
