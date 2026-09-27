@@ -22,14 +22,23 @@ type Keys = {
 };
 
 /** Research with the engine the user chose (or Auto's choice) for one task. */
-export function webResearch({ keys, engine, model, conversation }: {
+export function webResearch({ keys, engine, model, conversation, keepAlive }: {
   keys: Keys;
   engine: ResearchEngine;
   /** The Answer model, which plans Search API queries. */
   model: LanguageModel;
   /** Recent turns, so Search API planning can resolve follow-ups. */
   conversation: ModelMessage[];
+  /** Keeps closing a paid browser going after the response ends (a stop or the ceiling): after() from next/server. */
+  keepAlive?: (work: Promise<unknown>) => void;
 }): Research {
+  const lasting = (work: Promise<unknown>) => {
+    try {
+      keepAlive?.(work);
+    } catch {
+      // Without the platform's help the cleanup still runs, unawaited.
+    }
+  };
   return async (task, request, progress, deadline) => {
     // Engines end by the deadline themselves; this stops any request still waiting just after it.
     const signal = AbortSignal.any([request, AbortSignal.timeout(Math.max(0, deadline - Date.now()) + 5000)]);
@@ -42,16 +51,18 @@ export function webResearch({ keys, engine, model, conversation }: {
         signal,
         fetch,
         progress.step,
+        deadline - Date.now(),
       );
       // The Search API path stays in "searching" until it starts reading pages.
       progress.update(chosen === "tavily" ? { engine: chosen } : { phase: "reading", engine: chosen });
       if (chosen === "tavily")
         return { ...(await searchApiResearch(task, keys.searchKey, model, conversation, signal, progress)), engine: chosen };
+      const time = { deadline, keepAlive: lasting };
       const finding = chosen === "browser_use"
-        ? await browserUseResearch(task, keys.browserUseKey, signal, fetch, progress.step, { deadline })
+        ? await browserUseResearch(task, keys.browserUseKey, signal, fetch, progress.step, time)
         : chosen === "vision_agent" && keys.vision
-          ? await visionAgentResearch(task, { kernelKey: keys.kernelKey, vision: keys.vision }, signal, fetch, progress.step, { deadline })
-          : await kernelResearch(task, keys.kernelKey, signal, fetch, progress.step, { deadline });
+          ? await visionAgentResearch(task, { kernelKey: keys.kernelKey, vision: keys.vision }, signal, fetch, progress.step, time)
+          : await kernelResearch(task, keys.kernelKey, signal, fetch, progress.step, time);
       return { ...finding, engine: chosen };
     } catch (error) {
       if (request.aborted || !signal.aborted) throw error;

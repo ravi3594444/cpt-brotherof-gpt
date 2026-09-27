@@ -27,8 +27,11 @@ Keys are server-side environment variables.
    most. If it fails (or finds no sources), the model gets
    `{ error, canRetry, secondsLeft, retry }`: why it failed, the seconds left
    before the 280-second ceiling, and whether it may call the tool once more.
-   It may only when at least 90 seconds remain; the retry must end 220
-   seconds into the request, leaving the answer 60. Otherwise, and after any
+   It may only when at least 90 seconds remain and the failure would not
+   simply repeat: a rejected key, no credit, a rate limit (HTTP 401, 402,
+   403, 429), or a Browser Use run whose creation got no answer and may
+   still be running are not retried. The retry must end 220 seconds into the
+   request, leaving the answer 60. Otherwise, and after any
    successful research or a second call, the next step cannot call the tool
    (`toolChoice: "none"`) and the loop stops after it (at most three steps),
    so a third call never runs; a call while research is running, or after it
@@ -41,7 +44,10 @@ Keys are server-side environment variables.
    suggests how to narrow the question. The research record keeps both
    tries' steps in order, the successful try's sources, and the warning, and
    marks a failed research the model was told about (`failed: true`), which
-   the panel shows as "Research incomplete". The answer model should
+   the panel shows as "Research incomplete", also while the model decides
+   whether to try again or writes the answer. Each failed try adds the step
+   "Research did not finish: <reason>", shown without a check mark. The
+   answer model should
    support OpenAI-style tool calling. When the first call is rejected with
    HTTP 400, 404, or 422 about tools or functions (a context-length error
    does not count), Scout asks the same model in plain text for one word,
@@ -53,6 +59,10 @@ Keys are server-side environment variables.
    wins. Auto uses JEV to choose between Kernel and Browser Use Cloud when
    both and a JEV key (AI/ML API or TypeSafe) are available; low confidence or a JEV failure
    chooses Browser Use Cloud. With just one browser key, that engine runs.
+   Auto leaves out an engine that needs more time than research has left
+   (Browser Use Cloud 60 seconds, the vision agent 45, Kernel 20), which
+   matters for a late retry; each engine also refuses to open a paid browser
+   with less than its minimum, including when chosen explicitly.
    The older Tavily adapter remains available as a compatibility fallback.
 5. Browser Use Cloud runs its own browser agent. Kernel creates an entirely
    separate cloud browser and executes a fixed Playwright snippet for public
@@ -61,7 +71,10 @@ Keys are server-side environment variables.
 6. The server validates public source URLs, keeps up to six Browser Use
    sources or four Kernel pages, and returns the observed evidence to the
    answer model, numbered in order, as the tool result (in the plain-text
-   fallback, in its instructions). The model must cite exact supplied links;
+   fallback, in its instructions). When the engine gave a warning, such as a
+   partial result, the result is `{ warning, sources }` so the model knows;
+   a page reached with no text recorded is marked so the model does not
+   cite it for facts. The model must cite exact supplied links;
    source content is untrusted. The UI stream includes action steps, citations, and
    source cards with images when a page provides one.
 7. The route has a 280-second ceiling (`maxDuration` is 300). Research has a
@@ -69,8 +82,10 @@ Keys are server-side environment variables.
    has the rest. `streamAnswer` passes that deadline to `webResearch` and on
    to every engine, which also aborts any request still waiting 5 seconds
    after it. Browser Use Cloud polls the run's status every 2 seconds until
-   8 seconds before the deadline (shopping sites often need 1 to 3 minutes)
-   and reads the full run once it completes. If time runs out, the run
+   8 seconds before the deadline (shopping sites often need 1 to 3 minutes),
+   each poll ending by then, and reads the full run once it completes.
+   Creating the run may take up to 30 seconds; with no answer by then, the
+   run may exist, so Scout does not start another. If time runs out, the run
    fails, or status polls fail three times in a row, Scout reads the run's
    events (up to five pages, following the cursor) and keeps up to six
    public pages the agent reached, with their titles and the text it
@@ -81,12 +96,17 @@ Keys are server-side environment variables.
    research fail. Then Scout cancels a run it stopped polling and stops the
    run's cloud browser (found in the `browser.ready` event, or by listing
    the session's active browsers), in the background with 5-second
-   timeouts, after every run: a finished run does not stop its browser.
+   timeouts, after every run: a finished run does not stop its browser. That
+   cleanup, and closing Kernel sessions, is registered with `after()` from
+   `next/server`, which the route passes to `webResearch` (the platform's
+   `waitUntil` on Vercel and Cloudflare), so it still finishes when the user
+   stops the answer or the ceiling cuts it off.
    Browser Use runs have a one-dollar maximum cost per request. Kernel fits
    its script's `timeout_sec` into the time left and does not open a browser
    with less than 20 seconds; its sessions are deleted after use even on
    failure. The vision agent stops at its own budget or the deadline,
-   whichever comes first, and keeps the pages it read. Requests stop on
+   whichever comes first, keeps the pages it read, and does not open a
+   browser with less than 45 seconds. Requests stop on
    client cancellation.
 
 This is an **observable workflow**, not a stream of private model reasoning.

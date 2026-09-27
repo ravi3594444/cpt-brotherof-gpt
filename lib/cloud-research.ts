@@ -1,5 +1,5 @@
 import type { ResearchSource } from "./chat-types";
-import { extractPublicUrls, isSearchPage, publicUrl, ResearchError } from "./research.ts";
+import { extractPublicUrls, isSearchPage, publicUrl, repeats, ResearchError } from "./research.ts";
 
 export type BrowserEngine = "browser_use" | "kernel" | "vision_agent";
 export type ResearchEngine = "auto" | BrowserEngine | "tavily";
@@ -11,6 +11,10 @@ export type ResearchTime = {
   deadline?: number;
   clock?: () => number;
   nap?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** A signal that aborts a request after `ms`. */
+  timeout?: (ms: number) => AbortSignal;
+  /** Keeps cleanup (closing a paid browser) running after the response ends: the platform's waitUntil. */
+  keepAlive?: (work: Promise<unknown>) => void;
 };
 
 const browserUseApi = "https://api.browser-use.com/api/v4";
@@ -29,6 +33,12 @@ export const ENGINE_LABELS: Record<Exclude<ResearchEngine, "auto">, string> = {
   vision_agent: "Vision agent",
   tavily: "Search API",
 };
+// The least time left for which an engine opens a paid browser: Browser Use must
+// start its agent and still read what it reached, the vision agent needs a few
+// steps, and Kernel reads its pages in one go.
+export const ENGINE_MIN_MS: Record<BrowserEngine, number> = { browser_use: 60_000, vision_agent: 45_000, kernel: 20_000 };
+export const notEnoughTime = (engine: BrowserEngine) =>
+  new ResearchError(`There is not enough time left for ${engine === "vision_agent" ? "the vision agent" : ENGINE_LABELS[engine]} to research this. Try a narrower question.`);
 // What JEV weighs for each engine it may choose.
 const JEV_CRITERIA: Record<BrowserEngine, string> = {
   kernel: "Read a public page URL or quickly search and extract a few straightforward public pages.",
@@ -59,6 +69,7 @@ export async function jsonResponse<T>(response: Response, service: string): Prom
           : response.status === 429
             ? `${service} is rate limited. Try again later.`
             : `${service} could not complete this request (HTTP ${response.status}).`,
+      { retryable: !repeats(response.status) },
     );
   try {
     return (await response.json()) as T;
@@ -210,17 +221,20 @@ export async function browserUseResearch(
   const clock = time.clock ?? Date.now;
   const sleep = time.nap ?? nap;
   const deadline = time.deadline ?? clock() + 180_000;
+  const timeout = time.timeout ?? ((ms: number) => AbortSignal.timeout(ms));
+  if (deadline - clock() < ENGINE_MIN_MS.browser_use) throw notEnoughTime("browser_use");
   const headers = { "X-Browser-Use-API-Key": key, "Content-Type": "application/json" };
   const read = async <T>(path: string, ms = 10000) =>
     jsonResponse<T>(
       await fetcher(`${browserUseApi}${path}`, {
         headers,
-        signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(1000, Math.min(ms, deadline - clock())))]),
+        signal: AbortSignal.any([signal, timeout(Math.max(1000, Math.min(ms, deadline - clock())))]),
       }),
       "Browser Use Cloud",
     );
-  const created = await jsonResponse<{ id?: string; sessionId?: string }>(
-    await fetcher(browserUseBase, {
+  let response: Response;
+  try {
+    response = await fetcher(browserUseBase, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -247,10 +261,17 @@ export async function browserUseResearch(
           required: ["summary", "sources"],
         },
       }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
-    }),
-    "Browser Use Cloud",
-  );
+      signal: AbortSignal.any([signal, timeout(Math.min(30_000, deadline - clock()))]),
+    });
+  } catch {
+    signal.throwIfAborted();
+    // The run may exist without Scout hearing back; starting another would bill twice.
+    throw new ResearchError(
+      "Browser Use Cloud did not confirm the new run, which may still be running. Try again in a few minutes.",
+      { retryable: false },
+    );
+  }
+  const created = await jsonResponse<{ id?: string; sessionId?: string }>(response, "Browser Use Cloud");
   if (!created.id || !UUID.test(created.id))
     throw new ResearchError("Browser Use Cloud did not create a valid run.");
   const runId = created.id;
@@ -289,7 +310,8 @@ export async function browserUseResearch(
     while (clock() < deadline - SALVAGE_MS) {
       signal.throwIfAborted();
       try {
-        const polled = (await read<{ status?: string }>(`/runs/${runId}/status`)).status;
+        // A slow poll ends where the salvage window starts, so the events can still be read.
+        const polled = (await read<{ status?: string }>(`/runs/${runId}/status`, Math.min(10000, deadline - SALVAGE_MS - clock()))).status;
         misses = 0;
         if (polled && polled !== status) {
           status = polled;
@@ -337,7 +359,7 @@ export async function browserUseResearch(
     // Release the run and its cloud browser without delaying the answer: a run
     // Scout stopped polling is cancelled, and a browser outlives its run until stopped.
     const quick = () => AbortSignal.timeout(5000);
-    void (async () => {
+    const release = (async () => {
       if (!finished)
         await fetcher(`${browserUseBase}/${runId}/cancel`, { method: "POST", headers, signal: quick() }).catch(() => {});
       let ids = browsers;
@@ -353,6 +375,7 @@ export async function browserUseResearch(
           method: "PATCH", headers, body: JSON.stringify({ action: "stop" }), signal: quick(),
         }).catch(() => {})));
     })().catch(() => {});
+    time.keepAlive?.(release);
   }
 }
 
@@ -478,9 +501,8 @@ export async function kernelResearch(
 ): Promise<BrowserResult> {
   const clock = time.clock ?? Date.now;
   const left = () => (time.deadline ?? Infinity) - clock();
-  const tooLate = () => new ResearchError("There is not enough time left for Kernel to read pages. Try a narrower question.");
   // Kernel reads its pages in one go; without time for that, do not open (and pay for) a browser.
-  if (left() < 20000) throw tooLate();
+  if (left() < ENGINE_MIN_MS.kernel) throw notEnoughTime("kernel");
   const headers = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
   const browser = await jsonResponse<{ session_id?: string }>(
     await fetcher(kernelBase, {
@@ -497,7 +519,7 @@ export async function kernelResearch(
     progress?.(directUrl ? "Kernel is opening the supplied page" : "Kernel is finding and reading public pages");
     // The script, and the request waiting for it, end before research must.
     const seconds = Math.min(58, Math.floor((left() - 7000) / 1000));
-    if (seconds < 5) throw tooLate();
+    if (seconds < 5) throw notEnoughTime("kernel");
     const result = await jsonResponse<{
       success?: boolean; result?: unknown;
     }>(
@@ -520,9 +542,11 @@ export async function kernelResearch(
     return { sources };
   } finally {
     // A session costs money while open; cleanup also happens when extraction fails.
-    await fetcher(`${kernelBase}/${id}`, {
+    const closing = fetcher(`${kernelBase}/${id}`, {
       method: "DELETE", headers, signal: AbortSignal.timeout(5000),
     }).catch(() => {});
+    time.keepAlive?.(closing);
+    await closing;
   }
 }
 
@@ -533,17 +557,24 @@ export async function chooseResearchEngine(
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
+  /** Time research has left (ms); Auto leaves out engines that need more. */
+  timeLeft = Infinity,
 ): Promise<Exclude<ResearchEngine, "auto">> {
   if (requested !== "auto") {
     progress?.(`Selected ${ENGINE_LABELS[requested]}`);
     return requested;
   }
   // In order of preference when JEV is not asked.
-  const available: BrowserEngine[] = [
+  const connected: BrowserEngine[] = [
     ...(keys.browserUseKey ? ["browser_use" as const] : []),
     ...(keys.visionAgent ? ["vision_agent" as const] : []),
     ...(keys.kernelKey ? ["kernel" as const] : []),
   ];
+  // When no engine fits, the chosen one says there is not enough time.
+  const fits = connected.filter((e) => timeLeft >= ENGINE_MIN_MS[e]);
+  const available = fits.length ? fits : connected;
+  const skipped = connected.filter((e) => !available.includes(e));
+  if (skipped.length) progress?.(`Not enough time is left for ${skipped.map((e) => ENGINE_LABELS[e]).join(" or ")}`);
   // JEV reports its own decision, or why Scout fell back, through progress.
   if (available.length >= 2 && keys.jev)
     return jevChooseEngine(question, keys.jev, signal, fetcher, progress, available);

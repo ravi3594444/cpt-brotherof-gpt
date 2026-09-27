@@ -292,7 +292,8 @@ try {
     await context.close();
   }
   {
-    // Live research that failed but reached the model, then research that kept partial results.
+    // Live research that failed but reached the model, research that kept partial results,
+    // then research that failed on both of its tries.
     const context = await browser.newContext({ viewport: PHONE });
     const page = await context.newPage();
     const errors = [];
@@ -304,8 +305,10 @@ try {
     const reason = "The browser agent ran out of time before it reached a usable page. Try a narrower question or choose Kernel.";
     const partial = "The browser agent ran out of time; these are the pages it had reached";
     const task = "best shirts on shein";
+    const retryTask = "best rated men's linen shirts on us.shein.com";
     const steps = ["Atria Dawn Preview started research: “best shirts on shein”", "Selected Browser Use Cloud", "Browser agent is visiting pages"];
     const research = (data) => ({ type: "data-research", id: "research", data: { queries: [task], demo: false, steps, ...data } });
+    const didNotFinish = `Research did not finish: ${reason}`;
     const answer = (text) => [
       { type: "text-start", id: "answer" },
       { type: "text-delta", id: "answer", delta: text },
@@ -316,7 +319,7 @@ try {
       [
         { type: "start", messageId: "failed-1", messageMetadata: { demo: false } },
         research({ phase: "reading", sources: [], engine: "browser_use" }),
-        research({ phase: "writing", sources: [], warning: reason, failed: true }),
+        research({ phase: "writing", sources: [], warning: reason, failed: true, steps: [...steps, didNotFinish] }),
         ...answer("The research ran out of time, so this is not from sources: linen shirts are a safe pick."),
       ],
       [
@@ -328,9 +331,17 @@ try {
         }),
         ...answer("A linen shirt is top rated [1](https://us.shein.com/Men-Shirts-c-1979.html)."),
       ],
+      [
+        { type: "start", messageId: "failed-twice", messageMetadata: { demo: false } },
+        research({
+          phase: "writing", sources: [], warning: reason, failed: true, queries: [task, retryTask],
+          steps: [...steps, didNotFinish, `Atria Dawn Preview started research again: “${retryTask}”`, "Selected Browser Use Cloud", didNotFinish],
+        }),
+        ...answer("Research did not finish twice, so this is not from sources."),
+      ],
     ];
     let asked = 0;
-    await page.route("**/api/chat", (route) => route.fulfill(stream(replies[Math.min(asked++, 1)])));
+    await page.route("**/api/chat", (route) => route.fulfill(stream(replies[Math.min(asked++, replies.length - 1)])));
     await page.goto(BASE, { waitUntil: "networkidle" });
     await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
     await page.getByRole("textbox").fill("find me some best shirts on shein");
@@ -342,6 +353,11 @@ try {
       /Research incomplete/.test(failedText) && failedText.includes(reason) && !/Research stopped/.test(failedText), failedText);
     check("  the reason is on its own line, not cut off",
       await failed.locator(".activity-warning", { hasText: "ran out of time" }).isVisible(), failedText);
+    await failed.locator(".activity-line").click();
+    const failedStep = failed.locator(".agent-steps li", { hasText: "Research did not finish" });
+    check("  the step for the try that did not finish has no check mark",
+      await failedStep.locator("svg.step-failed").count() === 1 && await failedStep.locator("svg.lucide-check").count() === 0,
+      await failed.innerHTML());
     await shot(page, "research-incomplete-phone");
     await page.getByRole("textbox").fill("try again, men's linen shirts");
     await page.getByRole("textbox").press("Enter");
@@ -350,6 +366,13 @@ try {
     const keptText = await kept.innerText();
     check("  partial results say Research complete and show the warning line",
       /Research complete/.test(keptText) && await kept.locator(".activity-warning", { hasText: partial }).isVisible(), keptText);
+    await page.getByRole("textbox").fill("shein linen shirts please");
+    await page.getByRole("textbox").press("Enter");
+    await page.waitForFunction(() => document.querySelectorAll(".answer-actions").length === 3, null, { timeout: 10000 }).catch(() => {});
+    const twice = page.locator(".assistant-message").nth(2).locator(".agent-activity");
+    const twiceDetail = await twice.locator(".activity-detail").innerText().catch(() => "");
+    check("  research that failed twice says Research incomplete and shows the second try's task",
+      /Research incomplete/.test(await twice.innerText()) && twiceDetail === retryTask, twiceDetail);
     check("no console or page errors", errors.length === 0, errors.join(" | "));
     await context.close();
   }

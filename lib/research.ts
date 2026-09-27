@@ -1,5 +1,14 @@
 import type { ResearchSource } from "./chat-types";
-export class ResearchError extends Error {}
+export class ResearchError extends Error {
+  /** False when trying again in the same message would fail the same way: a rejected key, no credit, a limit, or a run that may still be going. */
+  readonly retryable: boolean;
+  constructor(message: string, { retryable = true }: { retryable?: boolean } = {}) {
+    super(message);
+    this.retryable = retryable;
+  }
+}
+/** HTTP statuses that repeat when asked again within seconds: a rejected key, no credit, or a limit. */
+export const repeats = (status: number) => [401, 402, 403, 429].includes(status);
 export function publicUrl(value: string): string | undefined {
   try {
     const u = new URL(value);
@@ -50,6 +59,7 @@ async function requestTavily(
         : response.status === 429
           ? "The search service has reached its limit. Please try again later."
           : "The search service is unavailable. Please try again.",
+      { retryable: !repeats(response.status) },
     );
   return response.json() as Promise<{
     results?: Array<{

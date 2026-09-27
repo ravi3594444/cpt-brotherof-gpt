@@ -321,6 +321,58 @@ test("a third research call never runs", async () => {
   assert.equal(researchData(parts).failed, true);
 });
 
+test("while the model may still try again, the panel records the failure and does not say an answer is being written", async () => {
+  const model = mockModel([callsResearch(["a"]), callsResearch(["b"]), reply("Found it [1](https://us.shein.com/linen).")]);
+  const timed = timedResearch([
+    { took: 20_000, error: timedOut, engine: "browser_use" },
+    { took: 5_000, finding: { sources: shirts, engine: "kernel" } },
+  ]);
+  const parts = await answer({ model, ...timed });
+  const afterFailure = parts.filter((p) => p.type === "data-research").map((p) => p.data).find((d) => d.failed);
+  assert.notEqual(afterFailure.phase, "writing");
+  assert.equal(afterFailure.warning, timedOut.message);
+  assert.equal(afterFailure.steps.at(-1), `Research did not finish: ${timedOut.message}`);
+  assert.equal(researchData(parts).steps.filter((s) => s.startsWith("Research did not finish")).length, 1);
+});
+
+test("a failure with no retry is recorded in the steps too", async () => {
+  const model = mockModel([callsResearch(["a"]), reply("The research ran out of time, so this is general knowledge.")]);
+  const timed = timedResearch([{ took: 195_000, error: timedOut, engine: "browser_use" }]);
+  const data = researchData(await answer({ model, ...timed }));
+  assert.equal(data.phase, "writing");
+  assert.equal(data.steps.at(-1), `Research did not finish: ${timedOut.message}`);
+});
+
+test("a failure that would happen again, such as no credit, cannot be retried", async () => {
+  const model = mockModel([callsResearch(["shirts"]), reply("Browser Use Cloud has no credit, so this is not from sources.")]);
+  const { research } = fakeResearch(new ResearchError("Browser Use Cloud has insufficient credit.", { retryable: false }));
+  await answer({ model, research });
+  const [output] = toolOutputs(model.doStreamCalls[1]);
+  assert.equal(output.canRetry, false);
+  assert.match(output.retry, /cannot run again/);
+  assert.deepEqual(model.doStreamCalls[1].toolChoice, { type: "none" });
+});
+
+test("partial results reach the model with their warning, and a page with no text is marked as such", async () => {
+  const partial = {
+    engine: "browser_use",
+    warning: "The browser agent ran out of time; these are the pages it had reached",
+    sources: [
+      { title: "Men's Shirts | SHEIN USA", url: "https://us.shein.com/Men-Shirts-c-1979.html", content: "Top rated: a linen shirt, 4.8 stars.", read: false },
+      { title: "us.shein.com", url: "https://us.shein.com/Oxford-Shirt-p-2.html", content: "", read: false },
+    ],
+  };
+  const model = mockModel([callsResearch(["shirts"]), reply("A linen shirt rates best [1](https://us.shein.com/Men-Shirts-c-1979.html).")]);
+  await answer({ model, research: fakeResearch(partial).research });
+  const [output] = toolOutputs(model.doStreamCalls[1]);
+  assert.equal(output.warning, partial.warning);
+  assert.deepEqual(output.sources.map((s) => [s.number, s.url, s.kind]), [
+    [1, partial.sources[0].url, "browser agent observation (verify against original page)"],
+    [2, partial.sources[1].url, "page reached with no text recorded; do not cite it for facts"],
+  ]);
+  assert.match(systemOf(model.doStreamCalls[0]), /sources come with a warning, such as partial results/);
+});
+
 test("the model is told never to promise research it is not doing in the same reply", async () => {
   const model = mockModel([reply("Hi!")]);
   await answer({ model, research: fakeResearch().research });

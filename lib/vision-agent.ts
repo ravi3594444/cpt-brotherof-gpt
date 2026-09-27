@@ -1,5 +1,5 @@
 import type { ResearchSource } from "./chat-types";
-import { jsonIn, jsonResponse, kernelBase } from "./cloud-research.ts";
+import { ENGINE_MIN_MS, jsonIn, jsonResponse, kernelBase, notEnoughTime, type ResearchTime } from "./cloud-research.ts";
 import { extractPublicUrls, isSearchPage, publicUrl, ResearchError } from "./research.ts";
 import { imageContent, visionChat, type VisionService } from "./vision.ts";
 
@@ -238,11 +238,13 @@ export async function visionAgentResearch(
   progress?: Progress,
   // Fits Vercel's 5-minute function limit with time left to write the answer;
   // the research deadline (epoch ms) ends it sooner when that comes first.
-  { maxSteps = 8, budgetMs = 200_000, deadline = Infinity, clock = Date.now }:
-    { maxSteps?: number; budgetMs?: number; deadline?: number; clock?: () => number } = {},
+  { maxSteps = 8, budgetMs = 200_000, deadline = Infinity, clock = Date.now, keepAlive }:
+    { maxSteps?: number; budgetMs?: number; deadline?: number; clock?: () => number; keepAlive?: ResearchTime["keepAlive"] } = {},
 ): Promise<{ sources: ResearchSource[]; warning?: string }> {
   const startedAt = clock();
   const end = Math.min(startedAt + budgetMs, deadline);
+  // Without time for a few steps, do not open (and pay for) a browser.
+  if (end - startedAt < ENGINE_MIN_MS.vision_agent) throw notEnoughTime("vision_agent");
   // Requests end then too, so a slow page or model cannot hold research past it.
   const budget = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, end - startedAt))]);
   const headers = { Authorization: `Bearer ${keys.kernelKey}`, "Content-Type": "application/json" };
@@ -328,8 +330,10 @@ export async function visionAgentResearch(
     return { sources: [...kept.values()].slice(0, 6), warning: "Vision agent ran out of time" };
   } finally {
     // A session costs money while open; close it even when a step fails.
-    await fetcher(`${kernelBase}/${id}`, {
+    const closing = fetcher(`${kernelBase}/${id}`, {
       method: "DELETE", headers, signal: AbortSignal.timeout(5000),
     }).catch(() => {});
+    keepAlive?.(closing);
+    await closing;
   }
 }

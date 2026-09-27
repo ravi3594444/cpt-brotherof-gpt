@@ -769,6 +769,11 @@ h1 {
   margin-top: 1px;
   flex: none;
 }
+/* A research try that did not finish: muted, and in the same 13px column as the checks. */
+.agent-steps svg.step-failed {
+  color: #7f9470;
+  margin: 2px 1px 0;
+}
 .source-cards {
   /* One row of every source that swipes sideways; kept off the screen edge so
      it does not fight Android's back gesture. */

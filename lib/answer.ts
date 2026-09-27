@@ -56,7 +56,11 @@ export type AnswerOptions = {
 };
 
 type Evidence = Array<{ number: number; title: string; url: string; content: string; kind: string }>;
-type ResearchOutcome = Evidence | { error: string; canRetry?: boolean; secondsLeft?: number; retry?: string };
+type ResearchOutcome =
+  | Evidence
+  // Sources with a warning, such as partial results from a browser agent that ran out of time.
+  | { warning: string; sources: Evidence }
+  | { error: string; canRetry?: boolean; secondsLeft?: number; retry?: string };
 type PromptMode = "tool" | "evidence" | "direct" | "web-off";
 
 // The route aborts a request 280 s after it starts (app/api/chat/route.ts).
@@ -73,7 +77,7 @@ const RESEARCH_NOT_FOR =
   "greetings, small talk, writing, math, code, or questions you can answer from the conversation";
 const RESEARCH_TOOL_DESCRIPTION = `Researches the public web with Scout's research engines (a real cloud browser) and returns the pages it read as numbered sources. Use it when ${RESEARCH_WHEN}. Do not use it for ${RESEARCH_NOT_FOR}. Once per message; if it fails, its result says whether one more call is allowed.`;
 const CITE_RULES =
-  "Explain gaps, conflicting evidence, and uncertainty. Distinguish your recommendations from sourced facts. Avoid lengthy verbatim quotes. If the sources cannot answer the question, say so clearly.";
+  "Explain gaps, conflicting evidence, and uncertainty. Distinguish your recommendations from sourced facts. Avoid lengthy verbatim quotes. If the sources cannot answer the question, say so clearly. When the sources come with a warning, such as partial results, say so briefly and treat them as incomplete.";
 const WHEN_RESEARCH_FAILS =
   "say in one sentence what happened, give what you know with a clear caveat that it is not from sources, and suggest how to narrow the question";
 const NO_FALSE_PROMISES = `Never say you will do something later, such as “let me try again” or “I will search”, unless you call ${RESEARCH_TOOL} in this same reply. If research failed and you cannot retry, ${WHEN_RESEARCH_FAILS}.`;
@@ -180,7 +184,6 @@ export async function streamAnswer(options: AnswerOptions): Promise<void> {
       data = { phase: "searching", queries: [task], sources: [], demo: false, steps: [] };
       step(`${modelName} started research: “${short}”`);
     } else {
-      step(`Research did not finish: ${data.warning}`);
       update({ phase: "searching", queries: [...data.queries, task], warning: undefined, failed: undefined });
       step(`${modelName} started research again: “${short}”`);
     }
@@ -199,21 +202,28 @@ export async function streamAnswer(options: AnswerOptions): Promise<void> {
       for (const [i, source] of data.sources.entries())
         writer.write({ type: "source-url", sourceId: String(i + 1), url: source.url, title: source.title });
       researched = true;
-      return data.sources.map((s, i) => ({
+      const evidence = data.sources.map((s, i) => ({
         number: i + 1,
         title: s.title,
         url: s.url,
         content: s.content,
-        kind: s.read ? "page content" : finding.engine === "browser_use"
-          ? "browser agent observation (verify against original page)"
-          : "search excerpt",
+        kind: !s.content.trim()
+          ? "page reached with no text recorded; do not cite it for facts"
+          : s.read ? "page content" : finding.engine === "browser_use"
+            ? "browser agent observation (verify against original page)"
+            : "search excerpt",
       }));
+      return finding.warning ? { warning: finding.warning, sources: evidence } : evidence;
     } catch (error) {
       signal.throwIfAborted();
       const message = error instanceof ResearchError ? error.message : "Research could not be completed. Please try again.";
-      canRetry = retryable && attempts < 2 && timeLeft() >= RETRY_NEEDS_MS;
-      // Left short of complete; the model is told, so the panel ends as "Research incomplete" with the reason.
-      update({ phase: "writing", sources: [], engine: undefined, warning: message, failed: true });
+      // A failure that would repeat (a rejected key, no credit, a run that may still be going) is not retried.
+      const repeats = error instanceof ResearchError && !error.retryable;
+      canRetry = retryable && !repeats && attempts < 2 && timeLeft() >= RETRY_NEEDS_MS;
+      // Left short of complete; the model is told, so the panel says "Research incomplete" with the reason.
+      // While the model may still try again, it is not yet writing the answer.
+      step(`Research did not finish: ${message}`);
+      update({ ...(!canRetry && { phase: "writing" as const }), sources: [], engine: undefined, warning: message, failed: true });
       return {
         error: message,
         canRetry,

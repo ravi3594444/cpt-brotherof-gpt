@@ -1,5 +1,6 @@
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { after } from "next/server";
 import { z } from "zod";
 import { serverConfig } from "@/lib/server-config";
 import { ACCESS_HEADER, accessAllowed } from "@/lib/access";
@@ -203,7 +204,8 @@ export async function POST(request: Request) {
         messages: answerMessages,
         question,
         webEnabled: input.webEnabled,
-        research: webResearch({ keys: config, engine: input.engine, model, conversation: answerMessages }),
+        // Closing cloud browsers outlives the response through the platform's waitUntil.
+        research: webResearch({ keys: config, engine: input.engine, model, conversation: answerMessages, keepAlive: after }),
         writer,
         modelName: config.modelName,
         photos,
