@@ -17,6 +17,8 @@ import {
   KeyRound,
   LoaderCircle,
   MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Search,
   Settings2,
@@ -42,6 +44,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -92,6 +95,7 @@ import {
 import { MAX_PHOTOS, requestTurns } from "@/lib/conversation";
 import { ACCESS_HEADER } from "@/lib/access";
 import { historyPhotoUrl, preparePhoto } from "@/lib/photos";
+import { SIDEBAR_BOOT_ATTRIBUTE, readSidebarOpen, saveSidebarOpen } from "@/lib/sidebar";
 import {
   DEMO_QUESTION,
   PHOTO_SAMPLE,
@@ -270,6 +274,7 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyQuery, setHistoryQuery] = useState("");
   const [initialPrompt, setInitialPrompt] = useState("");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   useEffect(() => {
     try {
       const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
@@ -290,9 +295,18 @@ export default function Home() {
     } catch {
       /* local storage can be disabled */
     }
+    setSidebarOpen(readSidebarOpen());
     setActiveId(nanoid());
     setLoaded(true);
     void fetchConfig().then((data) => data && setConfig(data));
+  }, []);
+  useEffect(() => {
+    // The mark set in <head> held the saved rail until the saved state was loaded.
+    if (loaded) document.documentElement.removeAttribute(SIDEBAR_BOOT_ATTRIBUTE);
+  }, [loaded]);
+  const changeSidebar = useCallback((open: boolean) => {
+    setSidebarOpen(open);
+    saveSidebarOpen(open);
   }, []);
   useEffect(() => {
     if (loaded) {
@@ -384,7 +398,9 @@ export default function Home() {
     <LogoReveal />
     <SidebarProvider
       className="scout-app"
-      style={{ "--sidebar-width": "252px" } as React.CSSProperties}
+      open={sidebarOpen}
+      onOpenChange={changeSidebar}
+      style={{ "--sidebar-width": "252px", "--sidebar-width-icon": "60px" } as React.CSSProperties}
     >
       <AppSidebar
         threads={threads}
@@ -574,18 +590,36 @@ function AppSidebar({
   onDemo: () => void;
   onSettings: () => void;
 }) {
-  const { setOpenMobile } = useSidebar();
+  const { setOpen, setOpenMobile } = useSidebar();
   const act = (f: () => void) => () => {
     f();
     setOpenMobile(false);
   };
+  const openButton = useRef<HTMLButtonElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const fold = (open: boolean, event: React.MouseEvent) => {
+    setOpen(open);
+    // From the keyboard, focus moves to the button that undoes the change.
+    if (event.detail === 0)
+      requestAnimationFrame(() => (open ? closeButton.current : openButton.current)?.focus());
+  };
   return (
-    <Sidebar className="scout-sidebar">
+    <Sidebar collapsible="icon" className="scout-sidebar">
       <SidebarHeader className="sidebar-top">
-        <button className="brand" onClick={act(onNew)} aria-label="Scout home">
-          <Mark />
-          scout<span className="text-primary text-xl -ml-1">.</span>
-        </button>
+        <div className="brand-row">
+          <button className="brand" onClick={act(onNew)} aria-label="Scout home">
+            <Mark />
+            scout<span className="text-primary text-xl -ml-1">.</span>
+          </button>
+          <SideIconButton
+            ref={closeButton}
+            label="Close sidebar"
+            className="icon-button sidebar-close"
+            onClick={(event) => fold(false, event)}
+          >
+            <PanelLeftClose size={19} />
+          </SideIconButton>
+        </div>
         <Button variant="outline" className="new-chat" onClick={act(onNew)}>
           <Plus size={17} />
           New conversation<span className="shortcut">↗</span>
@@ -644,7 +678,48 @@ function AppSidebar({
           <Settings2 size={16} className="ml-auto text-muted-foreground" />
         </button>
       </SidebarFooter>
+      {/* Desktop only: the folded sidebar, shown instead of everything above. */}
+      <div className="sidebar-rail">
+        <SideIconButton
+          ref={openButton}
+          label="Open sidebar"
+          className="rail-button rail-open"
+          onClick={(event) => fold(true, event)}
+        >
+          <Mark size={24} />
+          <PanelLeftOpen size={20} className="rail-open-icon" />
+        </SideIconButton>
+        <SideIconButton label="New conversation" className="rail-button" onClick={onNew}>
+          <SquarePen size={19} />
+        </SideIconButton>
+        <SideIconButton label="Search chats" className="rail-button" onClick={onHistory}>
+          <Search size={19} />
+        </SideIconButton>
+        <SideIconButton label="Explore a research example" className="rail-button" onClick={onDemo}>
+          <BookOpen size={19} />
+        </SideIconButton>
+        <SideIconButton label="Workspace settings" className="rail-button rail-settings" onClick={onSettings}>
+          <span className="avatar">S</span>
+        </SideIconButton>
+      </div>
     </Sidebar>
+  );
+}
+// An icon-only sidebar button: screen readers read its label, and hovering shows it.
+function SideIconButton({
+  label,
+  ...props
+}: React.ComponentProps<"button"> & { label: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button type="button" aria-label={label} {...props} />
+      </TooltipTrigger>
+      {/* Hidden at once when its button folds away, instead of fading at the corner. */}
+      <TooltipContent side="right" sideOffset={10} hideWhenDetached>
+        {label}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { SIDEBAR_BOOT_SCRIPT } from "@/lib/sidebar";
 import "./globals.css";
 export const metadata: Metadata = {
   title: "Scout — Your web, understood",
@@ -24,8 +25,10 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className="dark">
+    // The script below may mark <html> with the saved sidebar before React loads.
+    <html lang="en" className="dark" suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link
           rel="preconnect"

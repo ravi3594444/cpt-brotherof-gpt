@@ -230,6 +230,94 @@ textarea:focus-visible {
   color: #878f88;
   font-size: 12px;
 }
+.brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sidebar-close {
+  margin-right: -8px;
+}
+/* Desktop: the sidebar folds to an icon rail (collapsible="icon"). Before the
+   app loads, <html data-scout-sidebar> holds the saved rail so the first paint
+   already shows it. */
+.scout-app [data-slot="sidebar-gap"],
+.scout-sidebar {
+  transition-duration: 0.22s;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+.scout-sidebar {
+  overflow: hidden;
+}
+/* The open sidebar keeps its full width while it slides, so nothing reflows. */
+.scout-sidebar > [data-slot="sidebar-inner"] {
+  min-width: calc(var(--sidebar-width) - 1px);
+}
+html[data-scout-sidebar="collapsed"] .scout-app {
+  --sidebar-width: var(--sidebar-width-icon) !important;
+}
+.sidebar-rail {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  width: calc(var(--sidebar-width-icon) - 1px);
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 34px 0 max(22px, env(safe-area-inset-bottom));
+}
+:is([data-collapsible="icon"], html[data-scout-sidebar="collapsed"]) .scout-sidebar .sidebar-rail {
+  display: flex;
+}
+:is([data-collapsible="icon"], html[data-scout-sidebar="collapsed"])
+  .scout-sidebar
+  :is(.sidebar-top, [data-sidebar="content"], .side-footer) {
+  display: none;
+}
+.rail-button {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #a8adab;
+  transition:
+    background 0.18s,
+    color 0.18s;
+}
+.rail-button:hover {
+  background: #25282a;
+  color: #f5f6f3;
+}
+.rail-button:focus-visible {
+  outline-offset: 2px;
+}
+.rail-open {
+  margin-bottom: 14px;
+}
+.rail-open .rail-open-icon,
+.rail-open:is(:hover, :focus-visible) .brand-mark {
+  display: none;
+}
+.rail-open:is(:hover, :focus-visible) .rail-open-icon {
+  display: block;
+}
+.rail-settings {
+  margin-top: auto;
+}
+.rail-settings .avatar {
+  width: 32px;
+  height: 32px;
+}
+/* Tablets wide enough for the rail still get finger-sized buttons. */
+@media (pointer: coarse) {
+  .rail-button {
+    width: 44px;
+    height: 44px;
+  }
+}
 .main-shell {
   flex: 1;
   min-width: 0;
@@ -955,6 +1043,10 @@ h1 {
   .mobile-menu {
     display: inline-flex;
   }
+  /* Phones close the drawer by tapping outside it, as before. */
+  .sidebar-close {
+    display: none;
+  }
   .topbar {
     height: calc(58px + env(safe-area-inset-top));
     padding: env(safe-area-inset-top) 10px 0 10px;
@@ -1057,6 +1149,10 @@ h1 {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+  .scout-app [data-slot="sidebar-gap"],
+  .scout-sidebar {
+    transition: none;
   }
 }
 
