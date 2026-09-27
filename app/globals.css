@@ -304,6 +304,13 @@ html[data-scout-sidebar="collapsed"] .scout-app {
 .rail-open:is(:hover, :focus-visible) .rail-open-icon {
   display: block;
 }
+/* A conversation whose answer is still running. */
+.rail-running {
+  color: var(--primary);
+}
+.rail-running[aria-current="page"] {
+  background: #242728;
+}
 .rail-settings {
   margin-top: auto;
 }

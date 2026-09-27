@@ -7,7 +7,7 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 | Term | Meaning | Avoid saying |
 | --- | --- | --- |
 | Question | The latest user message Scout is answering, 1 to 6000 characters. | prompt, query |
-| Conversation | A user's questions and Scout's answers, kept on the device. | thread, chat (in UI copy) |
+| Conversation | A user's questions and Scout's answers, kept on the device. Its Answer keeps running while another Conversation is on screen. | thread, chat (in UI copy) |
 | Answer | Scout's reply to a Question, written by the Answer model. | response, completion |
 | Answer model | The OpenAI-compatible model that writes Answers, and decides whether a Question needs Research by calling the Research tool. Shown as "AI model". | LLM, JEV |
 | Research | Gathering Sources with a Research engine for the task the Answer model gave the Research tool, before the Answer is written. | search (when a browser does it) |
@@ -52,6 +52,7 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 - **Research phase**: searching → reading → writing → complete. It shows "Research stopped" if the request ends before complete, or if Research fails; the Answer model then says it failed.
 - **Browser Use Cloud run**: queued → dispatching → running → completed, failed, or cancelled.
 - **Sample mode**: on until a Research engine is connected; the Sample switch overrides it for the current Conversation.
+- **Answer run**: an Answer runs until it finishes, fails, or Stop ends it. Opening another Conversation or a new one leaves it running, with a spinner on its Conversation in the sidebar and the folded rail; several can run at once. Deleting its Conversation stops it. What it has written is saved about once a second as it streams, so a reload keeps the words so far, though the reload ends the Answer.
 
 ## Ambiguities
 
