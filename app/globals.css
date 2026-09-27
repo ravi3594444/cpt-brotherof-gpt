@@ -313,7 +313,8 @@ html[data-scout-sidebar="collapsed"] .scout-app {
 }
 /* Tablets wide enough for the rail still get finger-sized buttons. */
 @media (pointer: coarse) {
-  .rail-button {
+  .rail-button,
+  .icon-button.sidebar-close {
     width: 44px;
     height: 44px;
   }

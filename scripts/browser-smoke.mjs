@@ -513,6 +513,9 @@ try {
     check("  the main area widens, and nothing scrolls sideways",
       rail.main >= wide.main + 150 && !rail.sideScroll, JSON.stringify({ wide, rail }));
     check("  the width slides over about 0.2 s", /width 0\.2\d*s/.test(motion), motion);
+    // A click leaves focus alone, so no Open sidebar label pops up away from the pointer.
+    const clickTip = await page.locator('[data-slot="tooltip-content"]', { hasText: "Open sidebar" }).count();
+    check("  a click on Close sidebar shows no label on the rail", clickTip === 0, `${clickTip} open`);
     const railBox = await page.locator(".sidebar-rail").boundingBox();
     const offsets = [];
     for (const name of ["Open sidebar", "New conversation", "Search chats", "Explore a research example", "Workspace settings"]) {
@@ -569,6 +572,36 @@ try {
     check("Ctrl+B folds the sidebar and opens it again",
       byKey.sidebar <= 72 && byKey.saved === "collapsed" && Math.abs(backByKey.sidebar - 252) <= 2 && backByKey.saved === "expanded",
       JSON.stringify({ byKey, backByKey }));
+
+    // Folding or opening hides the focused button, so focus moves to the button that undoes it.
+    const focused = () => page.evaluate(() => document.activeElement?.getAttribute("aria-label") || document.activeElement?.tagName);
+    const toggleFrom = async (locator, key) => {
+      await locator.focus();
+      await page.keyboard.press(key);
+      await settle();
+      return focused();
+    };
+    const closeButton = page.getByRole("button", { name: "Close sidebar" });
+    const keyed = {
+      fold: await toggleFrom(closeButton, "Control+b"),
+      open: await toggleFrom(railButton("Search chats"), "Control+b"),
+      foldCmd: await toggleFrom(closeButton, "Meta+b"),
+      openCmd: await toggleFrom(railButton("Open sidebar"), "Meta+b"),
+    };
+    check("  with focus in the sidebar, Ctrl+B and Cmd+B move it to the button that undoes the change",
+      keyed.fold === "Open sidebar" && keyed.open === "Close sidebar" && keyed.foldCmd === "Open sidebar" && keyed.openCmd === "Close sidebar",
+      JSON.stringify(keyed));
+    const pressed = { fold: await toggleFrom(closeButton, "Enter"), open: await toggleFrom(railButton("Open sidebar"), "Enter") };
+    check("  and so do the Close sidebar and Open sidebar buttons from the keyboard",
+      pressed.fold === "Open sidebar" && pressed.open === "Close sidebar", JSON.stringify(pressed));
+    await page.getByRole("textbox").fill("Keep this text");
+    await page.keyboard.press("Control+b");
+    await settle();
+    const typing = await page.getByRole("textbox").evaluate((el) => ({ focused: document.activeElement === el, value: el.value }));
+    await page.keyboard.press("Control+b");
+    await settle();
+    check("  Ctrl+B while typing a question keeps the focus and the text",
+      typing.focused && typing.value === "Keep this text", JSON.stringify(typing));
     check("no console or page errors", errors.length === 0, errors.join(" | "));
     await context.close();
   }
@@ -616,6 +649,24 @@ try {
     check("a saved rail shows from the first paint, before the app loads", early.width <= 72 && !early.list, JSON.stringify(early));
     check("  and stays a rail while the app loads, without a flash of the open sidebar",
       loaded.width <= 72 && loaded.widest <= 72 && loaded.early === null, JSON.stringify(loaded));
+    await context.close();
+  }
+  {
+    // Touch tablets wide enough for the rail get finger-sized buttons to fold and open it.
+    const { context, page } = await open({ width: 800, height: 1280 }, { hasTouch: true });
+    const coarse = await page.evaluate(() => matchMedia("(pointer: coarse)").matches);
+    const box = (name) => page.getByRole("button", { name, exact: true }).boundingBox();
+    const brand = await page.getByRole("button", { name: "Scout home" }).boundingBox();
+    const close = await box("Close sidebar");
+    await page.getByRole("button", { name: "Close sidebar" }).tap();
+    await page.waitForTimeout(450);
+    const reopen = await box("Open sidebar");
+    const finger = (b) => b && b.width >= 42 && b.width <= 48 && b.height >= 42 && b.height <= 48;
+    check("on touch tablets, Close sidebar and Open sidebar are 42 to 48 px touch targets",
+      coarse && finger(close) && finger(reopen), JSON.stringify({ coarse, close, reopen }));
+    check("  Close sidebar stays in line with the brand, inside the sidebar",
+      Math.abs(close.y + close.height / 2 - (brand.y + brand.height / 2)) <= 2 && close.x + close.width <= 252 - 16,
+      JSON.stringify({ brand, close }));
     await context.close();
   }
   {

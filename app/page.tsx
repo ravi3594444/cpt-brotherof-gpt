@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { nanoid } from "nanoid";
 import { Chat, useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type FileUIPart } from "ai";
@@ -590,18 +590,26 @@ function AppSidebar({
   onDemo: () => void;
   onSettings: () => void;
 }) {
-  const { setOpen, setOpenMobile } = useSidebar();
+  const { open, setOpen, setOpenMobile } = useSidebar();
   const act = (f: () => void) => () => {
     f();
     setOpenMobile(false);
   };
   const openButton = useRef<HTMLButtonElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
-  const fold = (open: boolean, event: React.MouseEvent) => {
-    setOpen(open);
-    // From the keyboard, focus moves to the button that undoes the change.
-    if (event.detail === 0)
-      requestAnimationFrame(() => (open ? closeButton.current : openButton.current)?.focus());
+  const wasOpen = useRef(open);
+  useLayoutEffect(() => {
+    if (wasOpen.current === open) return;
+    wasOpen.current = open;
+    // Folding or opening hides whatever had focus in the sidebar, so focus moves to
+    // the button that undoes the change, whether a button or Ctrl/Cmd+B did it.
+    if (document.activeElement?.closest(".scout-sidebar"))
+      (open ? closeButton : openButton).current?.focus();
+  }, [open]);
+  const fold = (nextOpen: boolean, event: React.MouseEvent<HTMLButtonElement>) => {
+    // A click leaves nothing focused, so no label pops up on the rail away from the pointer.
+    if (event.detail !== 0) event.currentTarget.blur();
+    setOpen(nextOpen);
   };
   return (
     <Sidebar collapsible="icon" className="scout-sidebar">
