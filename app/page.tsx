@@ -72,6 +72,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { LogoReveal } from "@/components/logo-reveal";
+import { Elapsed, Thinking } from "@/components/thinking";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import {
@@ -92,7 +93,7 @@ import {
   usePromptInputAttachments,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
-import { MAX_PHOTOS, requestTurns } from "@/lib/conversation";
+import { capThinking, MAX_PHOTOS, requestTurns } from "@/lib/conversation";
 import { ACCESS_HEADER } from "@/lib/access";
 import { historyPhotoUrl, preparePhoto } from "@/lib/photos";
 import { SIDEBAR_BOOT_ATTRIBUTE, readSidebarOpen, saveSidebarOpen } from "@/lib/sidebar";
@@ -103,6 +104,7 @@ import {
   messageText,
   researchData,
   safeSourceUrl,
+  thinkingData,
   type LocalThread,
   type ScoutMessage,
   type ScoutConfig,
@@ -332,7 +334,7 @@ export default function Home() {
     const title = messageText(
       messages.find((m) => m.role === "user") || messages[0],
     ).slice(0, 80);
-    const stored = messages.map((m) => ({
+    const stored = messages.map((m) => capThinking({
       ...m,
       parts: m.parts.map((p) => (p.type === "file" ? { ...p, url: historyPhotoUrl(p.url) } : p)),
     }));
@@ -1043,6 +1045,17 @@ function ChatWorkspace({
                   const research = researchData(message);
                   const text = messageText(message);
                   const isLast = index === messages.length - 1;
+                  const thinking = message.role === "assistant" ? thinkingData(message) : undefined;
+                  const live = busy && isLast;
+                  const thinkingRow = thinking && ((thinking.streaming && live) || thinking.text) ? (
+                    <Thinking
+                      text={thinking.text}
+                      thinking={thinking.streaming && live}
+                      stopped={thinking.streaming && !live}
+                      ms={message.metadata?.thinkingMs}
+                      thoughts={thinking.thoughts}
+                    />
+                  ) : null;
                   const suggestions = message.parts.find(
                     (p) => p.type === "data-suggestions",
                   )?.data as string[] | undefined;
@@ -1077,6 +1090,7 @@ function ChatWorkspace({
                       {(research?.demo || message.metadata?.demo) && (
                         <span className="assistant-tag">Sample answer</span>
                       )}
+                      {thinking?.beforeResearch && thinkingRow}
                       {research && (
                         <ResearchActivity data={research} active={busy && isLast} />
                       )}
@@ -1115,6 +1129,7 @@ function ChatWorkspace({
                             ))}
                           </div>
                       )}
+                      {thinking && !thinking.beforeResearch && thinkingRow}
                       {text && (
                         <MessageContent className="!w-full !overflow-visible">
                           <MessageResponse
@@ -1184,6 +1199,7 @@ function ChatWorkspace({
                   <div className="progress-strip">
                     <LoaderCircle size={17} className="spin" />
                     {preview || config.demo ? "Opening a sample answer…" : "Thinking…"}
+                    <Elapsed after={3} className="progress-time" />
                   </div>
                 )}
                 {error && (

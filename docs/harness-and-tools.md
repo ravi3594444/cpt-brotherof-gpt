@@ -56,9 +56,22 @@ Keys are server-side environment variables.
    sessions are deleted after use even on failure. Requests stop on client
    cancellation.
 
-This is an **observable workflow**, not a stream of private model reasoning.
+Research steps are an **observable workflow**, not the model's reasoning.
 Displayed steps are actions the server actually took, such as selecting a
 browser, opening a session, visiting pages, and collecting sources.
+
+The answer model's own reasoning is shown apart from them, as **Thinking**:
+the provider's `reasoning_content` (or `reasoning`), or a `<think>` or
+`<thinking>` block that opens a step's text, streams as UI reasoning parts, one
+per thought, before and after a research call, in the plain-text fallback, and
+with Search the web off. A think tag later in an answer stays in the answer.
+Message metadata `thinkingMs` carries the finished thoughts' total time. The
+UI folds Thinking into one row ("Thinking…", then "Thought for N s") that
+opens to plain text. It is never sent back to the model, and saved history
+keeps up to 20,000 characters of it per answer. Because reasoning tokens count
+against the output limit on most providers, the answer allows 16,000 output
+tokens and the Search API query plan 1,500, with think blocks stripped before
+its JSON is read.
 
 ## Public app API
 
@@ -146,7 +159,8 @@ type ResearchData = {
   warning?: string;
   demo: boolean;
 };
-// Stream parts: data-research, source-url, text-start/delta/end, finish.
+// Stream parts: data-research, source-url, reasoning-start/delta/end,
+// message-metadata ({ thinkingMs }), text-start/delta/end, finish.
 // data-research and source-url appear only when the answer model researched.
 ```
 

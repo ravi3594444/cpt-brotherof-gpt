@@ -16,7 +16,8 @@ export type ResearchData = {
   steps?: string[];
 };
 export type ScoutMessage = UIMessage<
-  { demo?: boolean },
+  // thinkingMs: how long the Answer model's finished thoughts took in all.
+  { demo?: boolean; thinkingMs?: number },
   { research: ResearchData; suggestions: string[] }
 >;
 export type ScoutConfig = {
@@ -76,6 +77,20 @@ export function messageText(message: ScoutMessage) {
     .filter((p) => p.type === "text")
     .map((p) => p.text)
     .join("");
+}
+/** The Answer model's Thinking in a message: every thought's text, a blank line apart. */
+export function thinkingData(message: ScoutMessage) {
+  const thoughts = message.parts.filter((p) => p.type === "reasoning");
+  if (!thoughts.length) return;
+  const first = message.parts.findIndex((p) => p.type === "reasoning");
+  const research = message.parts.findIndex((p) => p.type === "data-research");
+  return {
+    text: thoughts.map((p) => p.text.trim()).filter(Boolean).join("\n\n"),
+    thoughts: thoughts.length,
+    streaming: thoughts.some((p) => p.state === "streaming"),
+    // Thinking before the Research tool call shows above the research panel.
+    beforeResearch: research < 0 || first < research,
+  };
 }
 export function researchData(message: ScoutMessage): ResearchData | undefined {
   return message.parts.findLast((p) => p.type === "data-research")?.data as

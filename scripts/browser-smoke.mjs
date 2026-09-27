@@ -292,6 +292,198 @@ try {
     await context.close();
   }
   {
+    // Thinking: a live reasoning model thinks before it answers, streamed one chunk at a time.
+    const context = await browser.newContext({ viewport: { width: 360, height: 740 } });
+    await context.addInitScript(() => {
+      const realFetch = window.fetch.bind(window);
+      const encode = (text) => new TextEncoder().encode(text);
+      window.__chats = [];
+      window.fetch = (input, init) => {
+        if (!String(input.url || input).endsWith("/api/chat")) return realFetch(input, init);
+        let body;
+        const stream = new ReadableStream({ start: (controller) => { body = controller; } });
+        window.__chats.push({
+          request: JSON.parse(init.body),
+          send: (chunk) => body.enqueue(encode(`data: ${JSON.stringify(chunk)}\n\n`)),
+          end: () => { body.enqueue(encode("data: [DONE]\n\n")); body.close(); },
+        });
+        return Promise.resolve(new Response(stream, {
+          headers: { "content-type": "text/event-stream", "x-vercel-ai-ui-message-stream": "v1" },
+        }));
+      };
+    });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    page.on("console", (m) => {
+      if (m.type() === "error" && !/fonts\.(googleapis|gstatic)|ERR_CERT|net::ERR/.test(m.text())) errors.push(m.text());
+    });
+    await page.route("**/api/config", (route) => route.fulfill({ json: {
+      access: "open", demo: false, modelConnected: true, searchConnected: true, modelName: "Atria Dawn Preview",
+      engines: { browserUse: false, kernel: true, visionAgent: false, tavily: false, jev: false, vision: false },
+    } }));
+    const send = (...chunks) => page.evaluate((list) => list.forEach((c) => window.__chats.at(-1).send(c)), chunks);
+    const end = () => page.evaluate(() => window.__chats.at(-1).end());
+    const ask = async (question) => {
+      const asked = await page.evaluate(() => window.__chats.length);
+      await page.getByRole("textbox").fill(question);
+      await page.getByRole("textbox").press("Enter");
+      await page.waitForFunction((n) => window.__chats.length > n, asked);
+    };
+    const row = (n) => page.locator(".assistant-message").nth(n).locator(".thinking");
+    const toggle = (n) => row(n).locator(".thinking-line");
+    await page.goto(BASE, { waitUntil: "networkidle" });
+    await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+
+    await ask("hey");
+    const early = await page.locator(".progress-strip").innerText();
+    await page.waitForTimeout(3300);
+    const late = await page.locator(".progress-strip").innerText();
+    check("before the first chunk the waiting line says Thinking…, and elapsed seconds after 3 s",
+      /^Thinking…$/.test(early.trim()) && /Thinking…\s*[3-9] s/.test(late), JSON.stringify({ early, late }));
+
+    const thought = "The user says hey.\nNo research is needed. <b>Not bold</b>";
+    await send(
+      { type: "start", messageId: "think-1", messageMetadata: { demo: false } },
+      { type: "reasoning-start", id: "thinking-1" },
+      { type: "reasoning-delta", id: "thinking-1", delta: thought },
+    );
+    await row(0).waitFor({ timeout: 5000 });
+    const streaming = await toggle(0).evaluate((el) => ({
+      text: el.innerText,
+      expanded: el.getAttribute("aria-expanded"),
+      shimmer: getComputedStyle(el.querySelector(".thinking-label")).animationName,
+      waiting: document.querySelectorAll(".progress-strip").length,
+    }));
+    check("while the model thinks, one collapsed row says Thinking… with a shimmer",
+      /^Thinking…/.test(streaming.text) && streaming.expanded === "false" && streaming.shimmer === "thinking-shimmer" &&
+        streaming.waiting === 0, JSON.stringify(streaming));
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const still = await row(0).locator(".thinking-label").evaluate((el) => getComputedStyle(el).animationName);
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    check("  with reduce motion on, it does not shimmer", still === "none", still);
+    const counted = await toggle(0).innerText().then(async (first) => {
+      await page.waitForTimeout(1300);
+      return { first, later: await toggle(0).innerText() };
+    });
+    check("  and counts the seconds", /Thinking…\s*[1-9] s/.test(counted.later), JSON.stringify(counted));
+    await shot(page, "thinking-streaming-360");
+
+    await send(
+      { type: "message-metadata", messageMetadata: { thinkingMs: 2400 } },
+      { type: "reasoning-end", id: "thinking-1" },
+      { type: "text-start", id: "answer" },
+      { type: "text-delta", id: "answer", delta: "Hi! What would you like me to look into?" },
+      { type: "text-end", id: "answer" },
+      { type: "finish", finishReason: "stop" },
+    );
+    await end();
+    await page.waitForSelector(".answer-actions", { timeout: 10000 });
+    const done = await toggle(0).evaluate((el) => ({ text: el.innerText, expanded: el.getAttribute("aria-expanded") }));
+    const answer = await page.locator(".answer-body").first().innerText();
+    check("when it is done the row says Thought for N s, still collapsed",
+      /^Thought for 2 s/.test(done.text) && done.expanded === "false" && (await row(0).locator(".thinking-text").count()) === 0,
+      JSON.stringify(done));
+    check("  and the answer text has none of the thinking",
+      /What would you like me to look into/.test(answer) && !/user says hey|No research|Not bold/.test(answer), answer);
+    await toggle(0).click();
+    const opened = await row(0).evaluate((el) => {
+      const box = el.querySelector(".thinking-text");
+      const style = box && getComputedStyle(box);
+      return {
+        expanded: el.querySelector(".thinking-line").getAttribute("aria-expanded"),
+        text: box?.innerText,
+        html: !!box?.querySelector("b"),
+        scrolls: style?.overflowY === "auto" && style?.maxHeight !== "none",
+        width: el.getBoundingClientRect().right <= innerWidth,
+        sideScroll: document.documentElement.scrollWidth > innerWidth,
+      };
+    });
+    check("  a tap shows the thinking as plain text, with its line breaks, in a scrolling box",
+      opened.expanded === "true" && opened.text === thought && !opened.html && opened.scrolls, JSON.stringify(opened));
+    check("  it fits a 360 px phone without scrolling sideways", opened.width && !opened.sideScroll, JSON.stringify(opened));
+    await shot(page, "thinking-open-360");
+
+    await ask("And the weather?");
+    check("thinking in history is never sent back to the model",
+      (await page.evaluate(() => window.__chats.at(-1).request.messages))
+        .every((m) => m.parts.every((p) => p.type === "text")));
+    await send(
+      { type: "start", messageId: "plain-1", messageMetadata: { demo: false } },
+      { type: "text-start", id: "answer" },
+      { type: "text-delta", id: "answer", delta: "It is sunny." },
+      { type: "text-end", id: "answer" },
+      { type: "finish", finishReason: "stop" },
+    );
+    await end();
+    await page.waitForFunction(() => document.querySelectorAll(".answer-actions").length === 2, null, { timeout: 10000 });
+    check("an answer without thinking shows no Thinking row", (await row(1).count()) === 0);
+
+    await ask("Find a fern for shade");
+    const source = { title: "Fern care", url: "https://ferns.example/care", content: "Ferns like shade.", read: true };
+    await send(
+      { type: "start", messageId: "research-1", messageMetadata: { demo: false } },
+      { type: "reasoning-start", id: "thinking-1" },
+      { type: "reasoning-delta", id: "thinking-1", delta: Array.from({ length: 30 }, (_, i) => `Step ${i + 1}: this needs the web.`).join("\n") },
+      { type: "message-metadata", messageMetadata: { thinkingMs: 1200 } },
+      { type: "reasoning-end", id: "thinking-1" },
+      { type: "data-research", id: "research", data: { phase: "writing", queries: ["ferns"], sources: [source], demo: false, engine: "kernel", steps: ["Selected Kernel"] } },
+      { type: "source-url", sourceId: "1", url: source.url, title: source.title },
+      { type: "reasoning-start", id: "thinking-2" },
+      { type: "reasoning-delta", id: "thinking-2", delta: "Source 1 answers it." },
+      { type: "message-metadata", messageMetadata: { thinkingMs: 3600 } },
+      { type: "reasoning-end", id: "thinking-2" },
+      { type: "text-start", id: "answer" },
+      { type: "text-delta", id: "answer", delta: "Most ferns like shade [1](https://ferns.example/care)." },
+      { type: "text-end", id: "answer" },
+      { type: "data-research", id: "research", data: { phase: "complete", queries: ["ferns"], sources: [source], demo: false, engine: "kernel", steps: ["Selected Kernel"] } },
+      { type: "finish", finishReason: "stop" },
+    );
+    await end();
+    await page.waitForFunction(() => document.querySelectorAll(".answer-actions").length === 3, null, { timeout: 10000 });
+    const order = await page.locator(".assistant-message").nth(2).evaluate((el) => {
+      const rows = el.querySelectorAll(".thinking");
+      const panel = el.querySelector(".agent-activity");
+      return {
+        rows: rows.length,
+        above: !!(rows[0] && panel && rows[0].compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING),
+        label: rows[0]?.innerText,
+      };
+    });
+    check("thinking before a research call is one row above the research panel",
+      order.rows === 1 && order.above && /^Thought for 4 s/.test(order.label), JSON.stringify(order));
+    await toggle(2).click();
+    await page.waitForTimeout(600); // the conversation eases any scroll
+    const inPlace = await toggle(2).evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom, height: innerHeight };
+    });
+    check("  a long thought opens in place, its row still in view",
+      inPlace.top >= 0 && inPlace.bottom <= inPlace.height, JSON.stringify(inPlace));
+
+    await ask("Stop halfway?");
+    await send(
+      { type: "start", messageId: "cut-1", messageMetadata: { demo: false } },
+      { type: "reasoning-start", id: "thinking-1" },
+      { type: "reasoning-delta", id: "thinking-1", delta: "Half a thought" },
+    );
+    await row(3).waitFor({ timeout: 5000 });
+    await end();
+    await page.waitForFunction(() => !document.querySelector(".thinking-shimmer"), null, { timeout: 5000 }).catch(() => {});
+    const cut = await toggle(3).innerText();
+    check("an answer that ends mid-thought says Thinking stopped", /^Thinking stopped/.test(cut), cut);
+
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+    await page.locator(".mobile-menu").click();
+    await page.locator('[data-mobile="true"] .history-item', { hasText: "hey" }).click();
+    await page.waitForSelector(".thinking", { timeout: 5000 }).catch(() => {});
+    check("a saved conversation keeps its collapsed Thinking row",
+      /^Thought for 2 s/.test(await toggle(0).innerText().catch(() => "")) && (await row(1).count()) === 0);
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
     // Many sources: every one gets a card in a row that swipes sideways.
     const { context, page, errors } = await open(PHONE);
     const sources = Array.from({ length: 6 }, (_, i) => ({
