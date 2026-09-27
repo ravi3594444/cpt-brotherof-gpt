@@ -24,15 +24,18 @@ Keys are server-side environment variables.
    when a good answer needs current or verifiable facts; otherwise it answers
    directly and the stream has no research parts. Scout adds no rules of its
    own to that decision. Research runs at most once per message: a second call
-   gets an error result, and the step after the tool has no tools
-   (`activeTools: []`, `stopWhen: stepCountIs(2)`). If research fails, the
-   model gets `{ error }` and says so, and the research record keeps the
-   warning. The answer model should support OpenAI-style tool calling. When
-   the first call is rejected with HTTP 400, 404, or 422 about tools or
-   functions, Scout asks the same model in plain text for one word, RESEARCH
-   or ANSWER, from the last six messages; an unclear reply or a failed call
-   means research. It then researches the question and answers from the
-   evidence, or answers directly.
+   gets an error result, and the step after the tool cannot call it
+   (`toolChoice: "none"`, `stopWhen: stepCountIs(2)`). That step still
+   defines the tool, because some providers reject a tool call and result
+   sent without one. If research fails, the model gets `{ error }` and says
+   so, and the research record keeps the warning. The answer model should
+   support OpenAI-style tool calling. When the first call is rejected with
+   HTTP 400, 404, or 422 about tools or functions (a context-length error
+   does not count), Scout asks the same model in plain text for one word,
+   RESEARCH or ANSWER, from the last six messages. A leading `<think>` block
+   is skipped; an unclear reply or a failed call means research. It then
+   researches the question and answers from the evidence, or answers
+   directly.
 4. When research runs, the server chooses one engine. An explicit selection
    wins. Auto uses JEV to choose between Kernel and Browser Use Cloud when
    both and a JEV key (AI/ML API or TypeSafe) are available; low confidence or a JEV failure

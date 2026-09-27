@@ -88,20 +88,22 @@ function answerSystemPrompt(
   return `${intro}\n${rules}${photo}\n${security}${evidence}`;
 }
 
+// Errors that name tools or functions for another reason, such as OpenAI's context-length error.
+const NOT_ABOUT_TOOLS = /context[ _]length|context window|maximum context|too many tokens|reduce the length/i;
+
 /** True when a provider turned the request away because it cannot take tools. */
 export function toolsRejected(error: unknown): boolean {
   const cause = RetryError.isInstance(error) ? error.lastError : error;
   if (UnsupportedFunctionalityError.isInstance(cause)) return /tool|function/i.test(cause.functionality);
-  return (
-    APICallError.isInstance(cause) &&
-    [400, 404, 422].includes(cause.statusCode ?? 0) &&
-    /tool|function/i.test(`${cause.message} ${cause.responseBody ?? ""}`)
-  );
+  if (!APICallError.isInstance(cause) || ![400, 404, 422].includes(cause.statusCode ?? 0)) return false;
+  const text = `${cause.message} ${cause.responseBody ?? ""}`;
+  return /tool|function/i.test(text) && !NOT_ABOUT_TOOLS.test(text);
 }
 
-/** The Answer model's one-word decision: Research unless its first word is ANSWER. */
+/** The Answer model's one-word decision, after any thinking: Research unless its first word is ANSWER. */
 export function wantsResearch(reply: string): boolean {
-  return reply.match(/[A-Za-z]+/)?.[0].toUpperCase() !== "ANSWER";
+  const decision = reply.replace(/^\s*<(think(?:ing)?)>[\s\S]*?(?:<\/\1>|$)/i, "");
+  return decision.match(/[A-Za-z]+/)?.[0].toUpperCase() !== "ANSWER";
 }
 
 /** Asks the Answer model in plain text whether to research, for a provider that cannot take tools. */
@@ -111,7 +113,8 @@ async function decideResearch(model: LanguageModel, messages: ModelMessage[], si
       model,
       system: `You decide whether Scout, a research assistant, should research the public web with its research engines (a real cloud browser) before answering the user's latest message. Choose RESEARCH when ${RESEARCH_WHEN}. Choose ANSWER for ${RESEARCH_NOT_FOR}. Reply with one word: RESEARCH or ANSWER.`,
       messages: textOnlyMessages(messages.slice(-6)),
-      maxOutputTokens: 20,
+      // Room for a reasoning model to think before its word.
+      maxOutputTokens: 400,
       maxRetries: 0,
       abortSignal: AbortSignal.any([signal, AbortSignal.timeout(12000)]),
     });
@@ -203,9 +206,10 @@ export async function streamAnswer(options: AnswerOptions): Promise<void> {
           }),
         },
         toolChoice: "auto" as const,
-        // The research step, then the answer step with no tools.
+        // The research step, then the answer step. It keeps the tool defined, as some providers require
+        // next to a tool call and result, but cannot call it.
         stopWhen: stepCountIs(2),
-        prepareStep: ({ stepNumber }: { stepNumber: number }) => (stepNumber > 0 ? { activeTools: [] } : {}),
+        prepareStep: ({ stepNumber }: { stepNumber: number }) => (stepNumber > 0 ? { toolChoice: "none" as const } : {}),
       }),
       // Log provider errors as streamText does by default, except the one the fallback handles.
       onError: ({ error }) => {

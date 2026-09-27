@@ -53,6 +53,19 @@ const toolsUnsupported = () => new APICallError({
   responseBody: '{"error":{"message":"tools is not supported for this model"}}',
   isRetryable: false,
 });
+// OpenAI's reply when a request with tools runs past the context window: it mentions functions but is not about tool support.
+const CONTEXT_LENGTH_MESSAGE =
+  "This model's maximum context length is 128000 tokens. However, your messages resulted in 130211 tokens (129800 in the messages, 411 in the functions). Please reduce the length of the messages or functions.";
+const contextLengthError = () => new APICallError({
+  message: CONTEXT_LENGTH_MESSAGE,
+  url: "https://api.example.com/v1/chat/completions",
+  requestBodyValues: {},
+  statusCode: 400,
+  responseBody: JSON.stringify({
+    error: { message: CONTEXT_LENGTH_MESSAGE, type: "invalid_request_error", param: "messages", code: "context_length_exceeded" },
+  }),
+  isRetryable: false,
+});
 
 const sources = [
   { title: "Fern care", url: "https://ferns.example/care", content: "Ferns like shade and damp soil.", read: true },
@@ -132,7 +145,9 @@ test("when the model calls the research tool, research runs once with its task a
   const [first, second] = model.doStreamCalls;
   assert.equal(model.doStreamCalls.length, 2);
   assert.deepEqual(first.tools.map((t) => t.name), ["web_research"]);
-  assert.equal(second.tools, undefined, "the answer step has no tools");
+  // The tool stays defined next to its call and result, which some providers require, but cannot be chosen.
+  assert.deepEqual(second.tools?.map((t) => t.name), ["web_research"]);
+  assert.deepEqual(second.toolChoice, { type: "none" }, "the answer step cannot call tools");
   assert.deepEqual(toolOutputs(second), [[
     { number: 1, title: "Fern care", url: "https://ferns.example/care", content: "Ferns like shade and damp soil.", kind: "page content" },
     { number: 2, title: "Balcony plants", url: "https://plants.example/balcony", content: "Many ferns grow well on shady balconies.", kind: "search excerpt" },
@@ -161,6 +176,7 @@ test("the answer step cannot research again", async () => {
   await assert.rejects(answer({ model, research }), ResearchError);
   assert.deepEqual(tasks, ["ferns"]);
   assert.equal(model.doStreamCalls.length, 2);
+  assert.deepEqual(model.doStreamCalls[1].toolChoice, { type: "none" });
 });
 
 test("a failed research goes back to the model as an error, and the answer still finishes", async () => {
@@ -253,11 +269,14 @@ test("other provider errors fail the answer as before, without the plain-text fa
     message: "Invalid API key", url: "https://api.example.com/v1/chat/completions", requestBodyValues: {},
     statusCode: 401, isRetryable: false,
   });
-  const model = mockModel([unauthorized], "RESEARCH");
-  const { tasks, research } = fakeResearch();
-  await assert.rejects(answer({ model, research }), (error) => APICallError.isInstance(error) && error.statusCode === 401);
-  assert.equal(model.doGenerateCalls.length, 0);
-  assert.deepEqual(tasks, []);
+  const tooLong = contextLengthError();
+  for (const error of [unauthorized, tooLong]) {
+    const model = mockModel([error], "RESEARCH");
+    const { tasks, research } = fakeResearch();
+    await assert.rejects(answer({ model, research }), (thrown) => thrown === error, error.message);
+    assert.equal(model.doGenerateCalls.length, 0, error.message);
+    assert.deepEqual(tasks, [], error.message);
+  }
 });
 
 test("an empty answer is an error", async () => {
@@ -281,14 +300,34 @@ test("recognises a provider turning tools away", () => {
   assert.equal(toolsRejected(apiError(400, "Invalid value for tool_choice")), true);
   assert.equal(toolsRejected(new UnsupportedFunctionalityError({ functionality: "tools" })), true);
   assert.equal(toolsRejected(apiError(400, "This model's maximum context length is 8192 tokens")), false);
+  assert.equal(toolsRejected(contextLengthError()), false);
+  assert.equal(toolsRejected(apiError(400, CONTEXT_LENGTH_MESSAGE)), false);
+  assert.equal(toolsRejected(apiError(400, "Bad Request", '{"error":{"code":"context_length_exceeded","message":"Too many tokens in the functions"}}')), false);
   assert.equal(toolsRejected(apiError(500, "tool server crashed")), false);
   assert.equal(toolsRejected(apiError(401, "Invalid API key")), false);
   assert.equal(toolsRejected(new Error("tools is not supported")), false);
 });
 
 test("reads the model's one-word decision; anything unclear means research", () => {
-  for (const reply of ["ANSWER", "answer.", "**ANSWER**", " Answer\nThe user said hello."])
+  for (const reply of [
+    "ANSWER", "answer.", "**ANSWER**", " Answer\nThe user said hello.",
+    "<think>\nThe user says hey, so no web is needed.\n</think>\n\nANSWER",
+    "<thinking>Small talk.</thinking>Answer",
+  ])
     assert.equal(wantsResearch(reply), false, reply);
-  for (const reply of ["RESEARCH", "Research.", "I would ANSWER", "", "???"])
+  for (const reply of [
+    "RESEARCH", "Research.", "I would ANSWER", "", "???",
+    "<think>\nThe user wants today's prices.\n</think>\nRESEARCH",
+    "<think>\nThe user says hey, so I should ANSWER",
+  ])
     assert.equal(wantsResearch(reply), true, reply);
+});
+
+test("the plain-text decision leaves a reasoning model room to think before its word", async () => {
+  const model = mockModel([toolsUnsupported(), reply("Hello!")], "<think>\nThe user says hey. No web needed.\n</think>\nANSWER");
+  const { tasks, research } = fakeResearch();
+  const parts = await answer({ model, research });
+  assert.deepEqual(tasks, []);
+  assert.ok(!hasResearch(parts));
+  assert.ok(model.doGenerateCalls[0].maxOutputTokens >= 256, String(model.doGenerateCalls[0].maxOutputTokens));
 });
