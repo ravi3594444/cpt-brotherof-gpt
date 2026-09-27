@@ -70,6 +70,11 @@ cost ceiling, and Android integration boundary.
 `vercel.json` builds Scout as a standard Next.js app: it installs with pnpm
 11.25.0 (the version `pnpm-workspace.yaml` needs) and runs `next build`.
 
+Its functions run in Singapore (`sin1`), next to the Atria API (Alibaba Cloud
+`ap-southeast-1`), so every answer starts sooner. Kernel and Browser Use run
+in the US, so research steps take a little longer from there. If you use a
+different answer model, set `regions` to the Vercel region closest to it.
+
 1. In Vercel, import this GitHub repository. Keep the defaults; `vercel.json`
    sets the install and build commands.
 2. In **Project → Settings → Environment Variables**, add the variables from

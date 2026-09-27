@@ -2,5 +2,8 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
   "installCommand": "npx --yes pnpm@11.25.0 install --frozen-lockfile",
-  "buildCommand": "npx next build"
+  "buildCommand": "npx next build",
+  "regions": [
+    "sin1"
+  ]
 }
