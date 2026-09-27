@@ -7,6 +7,7 @@ import {
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { z } from "zod";
 import { serverConfig } from "@/lib/server-config";
+import { ACCESS_HEADER, accessAllowed } from "@/lib/access";
 import { answerErrorMessage, modelConversation, PhotoError } from "@/lib/conversation";
 import { demoAnswer, withoutCitations } from "@/lib/demo";
 import { extractPublicUrls, searchWeb, readPages, ResearchError } from "@/lib/research";
@@ -45,8 +46,12 @@ const inputSchema = z.object({
   preview: z.boolean().default(false),
   engine: z.enum(["auto", "browser_use", "kernel", "tavily"]).default("auto"),
 });
-// Up to four photos, each shrunk on the device, fit well inside this.
-const MAX_REQUEST_CHARS = 6_000_000;
+// Vercel functions accept request bodies up to 4.5 MB; stay just under it so
+// an oversized request gets this route's message rather than the platform's.
+// Four photos shrunk on the device fit well inside.
+const MAX_REQUEST_CHARS = 4_400_000;
+// Research has a 120-second ceiling; allow time to finish streaming the answer.
+export const maxDuration = 150;
 const wait = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
     signal.throwIfAborted();
@@ -67,15 +72,20 @@ export async function POST(request: Request) {
     return new Response("This request must come from your Scout workspace.", {
       status: 403,
     });
+  const config = serverConfig();
+  if (!accessAllowed(config.accessCode, request.headers.get(ACCESS_HEADER)))
+    return new Response("Scout needs its access code. Reload Scout and enter it again.", {
+      status: 401,
+    });
   if (Number(request.headers.get("content-length") || 0) > MAX_REQUEST_CHARS)
-    return new Response("This conversation is too long. Start a new chat.", {
+    return new Response("This question is too large. Try fewer photos, or start a new chat.", {
       status: 413,
     });
   let input: z.infer<typeof inputSchema>;
   try {
     const raw = await request.text();
     if (raw.length > MAX_REQUEST_CHARS)
-      return new Response("This conversation is too long. Start a new chat.", {
+      return new Response("This question is too large. Try fewer photos, or start a new chat.", {
         status: 413,
       });
     input = inputSchema.parse(JSON.parse(raw));
@@ -94,7 +104,6 @@ export async function POST(request: Request) {
     return new Response("Your question must contain 1 to 6000 characters.", {
       status: 400,
     });
-  const config = serverConfig();
   const demo = input.preview || !(config.apiKey && config.baseURL && config.model);
   if (!demo && input.webEnabled && !(config.searchKey || config.browserUseKey || config.kernelKey))
     return new Response(

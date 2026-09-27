@@ -14,6 +14,7 @@ import {
   ExternalLink,
   Globe2,
   Image as ImageIcon,
+  KeyRound,
   LoaderCircle,
   MessageSquare,
   Plus,
@@ -89,6 +90,7 @@ import {
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
 import { MAX_PHOTOS, requestTurns } from "@/lib/conversation";
+import { ACCESS_HEADER } from "@/lib/access";
 import { historyPhotoUrl, preparePhoto } from "@/lib/photos";
 import {
   DEMO_QUESTION,
@@ -169,12 +171,79 @@ function SuggestionIcon({ icon }: { icon: Suggestion["icon"] }) {
   return <BookOpen size={16} />;
 }
 const INITIAL_CONFIG: ScoutConfig = {
+  access: "open",
   demo: true,
   modelConnected: false,
   searchConnected: false,
   modelName: "Scout",
   engines: { browserUse: false, kernel: false, tavily: false, jev: false },
 };
+// The workspace access code, remembered on this device (or for this visit
+// when the browser blocks storage) and sent with every request.
+const ACCESS_STORAGE_KEY = "scout-access-code";
+let accessCodeThisVisit = "";
+function savedAccessCode() {
+  try {
+    return localStorage.getItem(ACCESS_STORAGE_KEY) || accessCodeThisVisit;
+  } catch {
+    return accessCodeThisVisit;
+  }
+}
+function rememberAccessCode(code: string) {
+  accessCodeThisVisit = code;
+  try {
+    if (code) localStorage.setItem(ACCESS_STORAGE_KEY, code);
+    else localStorage.removeItem(ACCESS_STORAGE_KEY);
+  } catch {
+    /* kept for this visit only */
+  }
+}
+function accessHeaders(code = savedAccessCode()): Record<string, string> {
+  return code ? { [ACCESS_HEADER]: code } : {};
+}
+async function fetchConfig(code?: string): Promise<ScoutConfig | null> {
+  try {
+    const response = await fetch("/api/config", { headers: accessHeaders(code) });
+    return response.ok ? ((await response.json()) as ScoutConfig) : null;
+  } catch {
+    return null;
+  }
+}
+function AccessGate({ onUnlock }: { onUnlock: (code: string) => Promise<boolean> }) {
+  const [code, setCode] = useState("");
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+  return (
+    <main className="access-gate">
+      <form
+        onSubmit={async (event) => {
+          event.preventDefault();
+          setChecking(true);
+          setError("");
+          const unlocked = await onUnlock(code.trim());
+          setChecking(false);
+          if (!unlocked) setError("That code isn't right. Check it and try again.");
+        }}
+      >
+        <Mark size={38} />
+        <h1>Enter your access code</h1>
+        <p>This Scout workspace is private. Ask its owner for the code.</p>
+        <input
+          type="password"
+          aria-label="Access code"
+          autoComplete="current-password"
+          autoFocus
+          value={code}
+          onChange={(event) => setCode(event.target.value)}
+        />
+        {error && <p className="access-error" role="alert">{error}</p>}
+        <Button type="submit" disabled={!code.trim() || checking}>
+          {checking ? "Checking…" : "Continue"}
+        </Button>
+      </form>
+    </main>
+  );
+}
 function Mark({ size = 33 }: { size?: number }) {
   return <Globe2 size={size} strokeWidth={1.4} className="brand-mark" />;
 }
@@ -217,10 +286,7 @@ export default function Home() {
     }
     setActiveId(nanoid());
     setLoaded(true);
-    fetch("/api/config")
-      .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .then((data) => setConfig(data as ScoutConfig))
-      .catch(() => {});
+    void fetchConfig().then((data) => data && setConfig(data));
   }, []);
   useEffect(() => {
     if (loaded) {
@@ -285,6 +351,28 @@ export default function Home() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [newChat]);
+  const unlock = useCallback(async (code: string) => {
+    rememberAccessCode(code);
+    const data = await fetchConfig(code);
+    if (data) setConfig(data);
+    if (data?.access === "granted") return true;
+    rememberAccessCode("");
+    return false;
+  }, []);
+  const forgetAccess = async () => {
+    rememberAccessCode("");
+    setSettingsOpen(false);
+    const data = await fetchConfig("");
+    if (data) setConfig(data);
+  };
+  if (config.access === "required")
+    return (
+      <>
+        <LogoReveal />
+        <AccessGate onUnlock={unlock} />
+        <Toaster theme="dark" position="top-center" />
+      </>
+    );
   return (
     <>
     <LogoReveal />
@@ -426,6 +514,18 @@ export default function Home() {
               </div>
               <span className="connection-status">Local</span>
             </div>
+            {config.access === "granted" && (
+              <div className="connection-row">
+                <KeyRound size={19} />
+                <div>
+                  <strong>Access code</strong>
+                  <p>Saved on this device</p>
+                </div>
+                <button className="connection-action" onClick={() => void forgetAccess()}>
+                  Forget
+                </button>
+              </div>
+            )}
           </div>
           <p className="dialog-help">
             Browser Use Cloud and Kernel each need their own server key. JEV is a separate hosted decision service, not an on-phone model. Sample mode lets you try citations before a browser is connected. Phone browser control needs a native Android build and an on-device model.
@@ -567,6 +667,7 @@ function ChatWorkspace({
         messages: initialMessages,
         transport: new DefaultChatTransport({
           api: "/api/chat",
+          headers: () => accessHeaders(),
           prepareSendMessagesRequest: ({ messages, body }) => ({
             body: {
               ...body,

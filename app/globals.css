@@ -811,6 +811,58 @@ h1 {
   color: #9aa493;
   font-size: 13px;
 }
+.connection-action {
+  margin-left: auto;
+  flex: none;
+  padding: 6px 12px;
+  border: 1px solid #454b42;
+  border-radius: 999px;
+  color: #d8efa0;
+  font-size: 12px;
+}
+.access-gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+}
+.access-gate form {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+}
+.access-gate p {
+  color: #9aa493;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.access-gate input {
+  width: 100%;
+  height: 48px;
+  margin-top: 8px;
+  padding: 0 16px;
+  border: 1px solid #454b42;
+  border-radius: 14px;
+  background: #232624;
+  color: #eef1e9;
+  font-size: 16px;
+  outline: none;
+}
+.access-gate input:focus {
+  border-color: #7d926b;
+}
+.access-gate button[type="submit"] {
+  width: 100%;
+  height: 46px;
+  border-radius: 14px;
+}
+.access-gate .access-error {
+  color: #f5b8a4;
+}
 .connection-status {
   margin-left: auto;
   font-size: 12px;

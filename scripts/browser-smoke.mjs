@@ -99,6 +99,60 @@ const imageSize = (page, url) => page.evaluate(async (src) => {
 }, url);
 const pixel = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="5"><rect width="8" height="5" fill="#8a6"/></svg>');
 
+// Access code mode: run against a server started with SCOUT_ACCESS_CODE set,
+//   SMOKE_ACCESS_CODE=<the code> node scripts/browser-smoke.mjs <base-url>
+async function accessChecks(code) {
+  const ask = (headers) => fetch(new URL("/api/chat", BASE), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify({ preview: true, messages: [{ role: "user", parts: [{ type: "text", text: "How do AI agents search the web?" }] }] }),
+  });
+  check("the chat API refuses a request without the access code", (await ask({})).status === 401);
+  check("  and one with a wrong code", (await ask({ "x-scout-access": `${code}x` })).status === 401);
+  const allowed = await ask({ "x-scout-access": code });
+  check("  and answers one with the right code", allowed.status === 200 && /text-delta/.test(await allowed.text()));
+  const locked = await (await fetch(new URL("/api/config", BASE))).json();
+  check("the config API reveals nothing without the code", locked.access === "required" && !locked.modelConnected && !locked.searchConnected);
+
+  const context = await browser.newContext({ viewport: PHONE });
+  const page = await context.newPage();
+  const introGone = () => page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+  const gate = () => page.getByRole("heading", { name: "Enter your access code" }).waitFor({ timeout: 5000 }).then(() => true, () => false);
+  await page.goto(BASE, { waitUntil: "networkidle" });
+  await introGone();
+  check("the app asks for the access code first", (await gate()) && (await page.locator(".suggestion-chip").count()) === 0);
+  await shot(page, "access-gate");
+  await page.getByLabel("Access code").fill("not-the-code");
+  await page.getByRole("button", { name: "Continue" }).click();
+  check("  a wrong code is refused with a message",
+    await page.getByText("That code isn't right").waitFor({ timeout: 5000 }).then(() => true, () => false));
+  await page.getByLabel("Access code").fill(code);
+  await page.getByRole("button", { name: "Continue" }).click();
+  check("  the right code opens Scout", await page.waitForSelector(".suggestion-chip", { timeout: 5000 }).then(() => true, () => false));
+  await page.reload({ waitUntil: "networkidle" });
+  await introGone();
+  check("  and is remembered on this device", await page.waitForSelector(".suggestion-chip", { timeout: 5000 }).then(() => true, () => false));
+  const sent = [];
+  page.on("request", (r) => r.url().endsWith("/api/chat") && sent.push(r.headers()["x-scout-access"]));
+  await chip(page, "AI agents search the web").click();
+  await finished(page);
+  check("questions carry the code and get answers",
+    sent[0] === code && /prepared example/.test(await page.locator(".conversation").innerText()), JSON.stringify(sent));
+  await page.getByRole("button", { name: "Sample", exact: true }).click();
+  await page.getByRole("button", { name: "Forget" }).click();
+  check("Forget in the workspace settings locks Scout again", await gate());
+  await context.close();
+}
+if (process.env.SMOKE_ACCESS_CODE) {
+  try {
+    await accessChecks(process.env.SMOKE_ACCESS_CODE);
+  } finally {
+    await browser.close();
+  }
+  console.log(failures ? `\n${failures} check(s) failed` : "\nAll access checks passed");
+  process.exit(failures ? 1 : 0);
+}
+
 try {
   {
     // Logo intro: plays on load, gets out of the way, and a tap skips it.
@@ -108,7 +162,9 @@ try {
     const shown = await page.waitForSelector(".logo-reveal", { state: "visible", timeout: 3000 }).then(() => true, () => false);
     check("the logo intro plays when the app opens", shown);
     await shot(page, "intro");
-    const gone = await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 4000 }).then(() => true, () => false);
+    // CSS fades it out on schedule even before the app's JavaScript loads,
+    // so check what the user sees rather than when the element is removed.
+    const gone = await page.waitForSelector(".logo-reveal", { state: "hidden", timeout: 4000 }).then(() => true, () => false);
     check("  and gets out of the way by itself", gone);
     await page.reload({ waitUntil: "domcontentloaded" });
     // The intro marks itself skippable once the app has loaded.

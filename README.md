@@ -33,6 +33,7 @@ Put these values in the host's secret environment, not in the app bundle:
 | `KERNEL_API_KEY` | Kernel cloud browser sessions and Playwright execution |
 | `TYPESAFE_API_KEY` | Optional JEV routing between the two browser services |
 | `TAVILY_API_KEY` | Optional legacy search/extraction fallback |
+| `SCOUT_ACCESS_CODE` | Optional. When set, the app and API ask for this code, so strangers who find the site cannot spend your credit |
 
 For live research, connect the model plus Browser Use **or** Kernel. The two
 browser keys together enable engine choice in the chat. JEV is optional and
@@ -44,6 +45,27 @@ put them in `NEXT_PUBLIC_` variables.
 See [harness and tool schemas](docs/harness-and-tools.md) for the run sequence,
 request and response types, provider API shapes, cancellation behavior,
 cost ceiling, and Android integration boundary.
+
+## Deploy on Vercel
+
+`vercel.json` builds Scout as a standard Next.js app: it installs with pnpm
+11.25.0 (the version `pnpm-workspace.yaml` needs) and runs `next build`.
+
+1. In Vercel, import this GitHub repository. Keep the defaults; `vercel.json`
+   sets the install and build commands.
+2. In **Project → Settings → Environment Variables**, add the variables from
+   the table above (at least `MODEL_BASE_URL`, `MODEL_ID`, `MODEL_API_KEY`, and
+   `BROWSER_USE_API_KEY` or `KERNEL_API_KEY`). They stay on the server; the
+   browser and the Android app never see them.
+3. Add `SCOUT_ACCESS_CODE` with a long code of your choice. Scout then asks
+   for it once on each phone or browser and refuses requests without it.
+4. Redeploy so the new variables take effect.
+
+Vercel limits request bodies to 4.5 MB, so the chat route refuses requests
+over 4.4 MB (photos are shrunk on the device and fit well inside). The chat
+route may run for up to 150 seconds (`maxDuration`); every Vercel plan allows
+that with Fluid compute. Without `SCOUT_ACCESS_CODE`, anyone who finds the
+Vercel address can use Scout with your keys' credit.
 
 ## Development
 
@@ -75,9 +97,18 @@ managed Sites environment.
 ## Android
 
 `android/` is a Capacitor wrapper with app ID `app.scout.research`. It opens
-the private hosted preview over HTTPS and needs internet access. Android Studio
-and an Android SDK can build a debug APK locally after `pnpm exec cap sync
-android`; no APK has been built or device-tested in this workspace.
+the hosted Scout site over HTTPS and needs internet access; API keys stay on
+that site's server, never in the app. Point it at your deployment and build a
+debug APK with JDK 21 and the Android SDK (platform 36):
+
+```sh
+SCOUT_APP_URL=https://your-project.vercel.app pnpm exec cap sync android
+cd android && ./gradlew assembleDebug   # app/build/outputs/apk/debug/app-debug.apk
+```
+
+Without `SCOUT_APP_URL` the app opens the original private Sites preview. A
+debug APK has been built this way but not yet tested on a device. Store
+releases need a release build signed with your own key.
 
 The native on-phone browser/model track is specified in the harness document.
 The wrapper does **not** control Chrome or contain local model weights.

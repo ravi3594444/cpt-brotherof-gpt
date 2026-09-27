@@ -39,10 +39,16 @@ browser, opening a session, visiting pages, and collecting sources.
 
 ## Public app API
 
+When the server has `SCOUT_ACCESS_CODE`, both endpoints need the code in the
+`x-scout-access` request header: `POST /api/chat` answers 401 without it, and
+`GET /api/config` returns `access: "required"` with nothing connected. Without
+the variable, `access` is `"open"`; with the right code it is `"granted"`.
+
 `GET /api/config` returns only booleans and a display name:
 
 ```ts
 type ScoutConfig = {
+  access: "open" | "granted" | "required";
   demo: boolean;
   modelConnected: boolean;
   searchConnected: boolean;

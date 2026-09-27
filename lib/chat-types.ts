@@ -20,6 +20,8 @@ export type ScoutMessage = UIMessage<
   { research: ResearchData; suggestions: string[] }
 >;
 export type ScoutConfig = {
+  // "required" hides the workspace until the right access code is sent.
+  access: "open" | "granted" | "required";
   demo: boolean;
   modelConnected: boolean;
   searchConnected: boolean;
