@@ -17,7 +17,9 @@ sideways row with a card for every source (with the page's picture when it
 has one), citations, copy-with-sources, stop generation, and up to four photos
 per question for the answer model. A short logo intro plays when the app
 opens (skipped with a tap, or when the device asks for reduced motion). The
-layout is phone-first, like ChatGPT's home screen, for the Android app.
+layout is phone-first, like ChatGPT's home screen, for the Android app. On
+wider screens the sidebar folds to an icon rail (or press Ctrl+B / ⌘B), and
+the device remembers the choice; phones keep the menu drawer.
 
 ## Server configuration
 
