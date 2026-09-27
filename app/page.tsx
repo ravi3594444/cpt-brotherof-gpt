@@ -111,6 +111,12 @@ const STORAGE_KEY = "scout-threads-v1";
 const MAX_SOURCE_CARDS = 8;
 type Suggestion = (typeof SUGGESTIONS)[number] | typeof PHOTO_SAMPLE;
 const PHOTO_ONLY_QUESTION = "What's in this photo?";
+const ENGINE_NAMES: Record<NonNullable<ResearchData["engine"]>, string> = {
+  browser_use: "Browser Use Cloud",
+  kernel: "Kernel",
+  vision_agent: "Vision agent",
+  tavily: "Search API",
+};
 // Photos waiting in the question box, before they are sent.
 function ComposerPhotos() {
   const { files, remove } = usePromptInputAttachments();
@@ -176,7 +182,7 @@ const INITIAL_CONFIG: ScoutConfig = {
   modelConnected: false,
   searchConnected: false,
   modelName: "Scout",
-  engines: { browserUse: false, kernel: false, tavily: false, jev: false },
+  engines: { browserUse: false, kernel: false, visionAgent: false, tavily: false, jev: false, vision: false },
 };
 // The workspace access code, remembered on this device (or for this visit
 // when the browser blocks storage) and sent with every request.
@@ -492,10 +498,20 @@ export default function Home() {
               <Zap size={19} />
               <div>
                 <strong>JEV</strong>
-                <p>Fast route selection when both browsers are connected</p>
+                <p>Fast route selection when two research engines are connected</p>
               </div>
               <span className="connection-status">
                 {config.engines.jev ? "Connected" : "Optional"}
+              </span>
+            </div>
+            <div className="connection-row">
+              <ImageIcon size={19} />
+              <div>
+                <strong>Vision model</strong>
+                <p>Describes photos and drives the vision agent&apos;s browser</p>
+              </div>
+              <span className="connection-status">
+                {config.engines.vision ? "Connected" : "Optional"}
               </span>
             </div>
             <div className="connection-row">
@@ -653,7 +669,7 @@ function ChatWorkspace({
   // Sample mode starts on until a research engine is connected; the switch overrides it.
   const [previewChoice, setPreview] = useState<boolean | null>(null);
   const preview = previewChoice ?? !config.searchConnected;
-  const [engine, setEngine] = useState<"auto" | "browser_use" | "kernel" | "tavily">("auto");
+  const [engine, setEngine] = useState<"auto" | "browser_use" | "kernel" | "vision_agent" | "tavily">("auto");
   const webAvailable = preview || config.searchConnected;
   const webEnabled = webSelected && webAvailable;
   const [input, setInput] = useState("");
@@ -869,6 +885,7 @@ function ChatWorkspace({
                     <DropdownMenuRadioItem value="auto">Auto</DropdownMenuRadioItem>
                     {config.engines.browserUse && <DropdownMenuRadioItem value="browser_use">Browser Use Cloud</DropdownMenuRadioItem>}
                     {config.engines.kernel && <DropdownMenuRadioItem value="kernel">Kernel</DropdownMenuRadioItem>}
+                    {config.engines.visionAgent && <DropdownMenuRadioItem value="vision_agent">Vision agent</DropdownMenuRadioItem>}
                     {config.engines.tavily && <DropdownMenuRadioItem value="tavily">Search API</DropdownMenuRadioItem>}
                   </DropdownMenuRadioGroup>
                 </>
@@ -1188,11 +1205,12 @@ function ResearchActivity({
           : data.phase === "writing"
             ? "Putting the answer together"
             : "Research complete";
-  const engine = data.engine === "browser_use" ? "Browser Use Cloud" : data.engine === "kernel" ? "Kernel" : data.engine ? "Search API" : "";
+  const engine = data.engine ? ENGINE_NAMES[data.engine] : "";
   const detail = data.sources.length
     ? `${data.sources.length} ${data.sources.length === 1 ? "source" : "sources"}${engine ? ` · ${engine}` : ""}`
     : data.engine === "browser_use" ? "Browser Use Cloud is navigating"
       : data.engine === "kernel" ? "Kernel is reading pages"
+      : data.engine === "vision_agent" ? "Vision agent is browsing"
         : data.queries[0] || "Finding relevant sources";
   return (
     <div className={`agent-activity ${open ? "open" : ""}`}>

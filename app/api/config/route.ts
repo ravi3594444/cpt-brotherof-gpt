@@ -19,7 +19,7 @@ export async function GET(request: Request) {
           modelConnected: false,
           searchConnected: false,
           modelName: "Scout",
-          engines: { browserUse: false, kernel: false, tavily: false, jev: false },
+          engines: { browserUse: false, kernel: false, visionAgent: false, tavily: false, jev: false, vision: false },
         }
       : {
           access,
@@ -30,8 +30,10 @@ export async function GET(request: Request) {
           engines: {
             browserUse: !!config.browserUseKey,
             kernel: !!config.kernelKey,
+            visionAgent: !!(config.kernelKey && config.vision),
             tavily: !!config.searchKey,
             jev: !!config.jev,
+            vision: !!config.vision,
           },
         };
   return Response.json(body, { headers: { "Cache-Control": "no-store" } });

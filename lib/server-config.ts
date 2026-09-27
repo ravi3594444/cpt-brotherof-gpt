@@ -1,4 +1,5 @@
 import { jevService } from "./cloud-research.ts";
+import { visionService } from "./vision.ts";
 
 // Server-only settings from environment variables: Vercel project settings, a
 // local .env file, or Cloudflare Worker variables (nodejs_compat fills
@@ -16,5 +17,13 @@ export function serverConfig() {
     jev: jevService({ aimlapiKey: e.AIMLAPI_API_KEY, typesafeKey: e.TYPESAFE_API_KEY }),
     modelName: e.MODEL_DISPLAY_NAME || "Your model",
     accessCode: e.SCOUT_ACCESS_CODE || "",
+    // A model that can see (e.g. DeepSeek V4.1 Flash on AI/ML API) for photos
+    // and the browser agent, when the answer model reads text only.
+    vision: visionService({
+      model: e.VISION_MODEL_ID,
+      baseURL: e.VISION_MODEL_BASE_URL,
+      apiKey: e.VISION_MODEL_API_KEY,
+      aimlapiKey: e.AIMLAPI_API_KEY,
+    }),
   };
 }
