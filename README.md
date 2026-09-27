@@ -31,7 +31,8 @@ Put these values in the host's secret environment, not in the app bundle:
 | `MODEL_DISPLAY_NAME` | Friendly name shown in the workspace |
 | `BROWSER_USE_API_KEY` | Browser Use Cloud V4 agent and its own cloud browser |
 | `KERNEL_API_KEY` | Kernel cloud browser sessions and Playwright execution |
-| `TYPESAFE_API_KEY` | Optional JEV routing between the two browser services |
+| `AIMLAPI_API_KEY` | Optional JEV routing between the two browser services, through AI/ML API (`typesafe/jev`) |
+| `TYPESAFE_API_KEY` | The same JEV routing straight from TypeSafe (used only when `AIMLAPI_API_KEY` is not set) |
 | `TAVILY_API_KEY` | Optional legacy search/extraction fallback |
 | `SCOUT_ACCESS_CODE` | Optional. When set, the app and API ask for this code, so strangers who find the site cannot spend your credit |
 
@@ -125,5 +126,5 @@ logged JEV outcome, pasted-link extraction, conversation preparation, and
 legacy search error behavior. A
 TypeScript check and production build cover the UI and API. The provider
 paths cannot be tested end-to-end without the separate Browser Use, Kernel,
-and optional TypeSafe keys. Browser Use Cloud runs are capped at one US dollar
+and optional JEV (AI/ML API or TypeSafe) keys. Browser Use Cloud runs are capped at one US dollar
 per question; page summaries should always be checked against the links.

@@ -16,7 +16,7 @@ Keys are server-side environment variables.
    the connected model without claiming web verification.
 3. For live research, the server chooses one engine. An explicit selection
    wins. Auto uses JEV to choose between Kernel and Browser Use Cloud when
-   both and the TypeSafe key are available; low confidence or a JEV failure
+   both and a JEV key (AI/ML API or TypeSafe) are available; low confidence or a JEV failure
    chooses Browser Use Cloud. With just one browser key, that engine runs.
    The older Tavily adapter remains available as a compatibility fallback.
 4. Browser Use Cloud runs its own browser agent. Kernel creates an entirely
@@ -124,7 +124,7 @@ fake product pictures.
 | --- | --- | --- | --- |
 | Browser Use Cloud V4 | `POST https://api.browser-use.com/api/v4/runs` with `task`, `maxCostUsd: 1`, and an output schema for `sources[{url,title,summary,image?}]`; poll `GET /api/v4/runs/{id}`; cancel `POST /api/v4/runs/{id}/cancel` | completed run's structured `output.sources` or parseable `result` | `BROWSER_USE_API_KEY` in `X-Browser-Use-API-Key` |
 | Kernel browser | `POST https://api.onkernel.com/browsers`; `POST /browsers/{id}/playwright/execute` with fixed `code` and `timeout_sec`; `DELETE /browsers/{id}` | Playwright's returned list `[{url,title,content,read,image?}]` | `KERNEL_API_KEY` as Bearer |
-| JEV | `POST https://api.typesafe.ai/v1/systemone` with `state`, `model: "jev-latest"`, and a `choice` question between `kernel` and `browser_use` | `answers.route.choice` and `confidence`; Kernel requires confidence at least 0.65 | `TYPESAFE_API_KEY` as Bearer |
+| JEV | `POST https://api.aimlapi.com/v1/decisions` with `model: "typesafe/jev"` (AI/ML API), or `POST https://api.typesafe.ai/v1/systemone` with `model: "jev-latest"` (TypeSafe); both take `state` and a `choice` question between `kernel` and `browser_use` | `answers.route.choice` and `confidence`; Kernel requires confidence at least 0.65 | `AIMLAPI_API_KEY` or `TYPESAFE_API_KEY` as Bearer |
 | Answer model | OpenAI-compatible Chat Completions via Vercel AI SDK `streamText` | answer tokens grounded in validated source list | `MODEL_BASE_URL`, `MODEL_ID`, `MODEL_API_KEY` |
 | Legacy search API | Tavily `search` and `extract` | ranked links and snippets, optionally full page text | `TAVILY_API_KEY` |
 

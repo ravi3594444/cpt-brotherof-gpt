@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chooseResearchEngine } from "../lib/cloud-research.ts";
+import { chooseResearchEngine, jevService } from "../lib/cloud-research.ts";
 
 const signal = new AbortController().signal;
-const allKeys = { browserUseKey: "b", kernelKey: "k", jevKey: "j", searchKey: "s" };
+const allKeys = { browserUseKey: "b", kernelKey: "k", jev: jevService({ aimlapiKey: "j" }) };
 const noJevCall = async () => assert.fail("JEV should not be called");
 const jevAnswers = (choice, confidence) => async () =>
   Response.json({ answers: { route: { choice, confidence } } });
@@ -21,7 +21,7 @@ test("an explicit engine choice wins without asking JEV", async () => {
 
 test("Auto uses the only connected browser, or the Search API with none", async () => {
   assert.deepEqual(
-    await choose("auto", { ...allKeys, browserUseKey: "", jevKey: "" }),
+    await choose("auto", { ...allKeys, browserUseKey: "", jev: undefined }),
     { engine: "kernel", steps: ["Selected Kernel"] },
   );
   assert.deepEqual(
@@ -29,14 +29,14 @@ test("Auto uses the only connected browser, or the Search API with none", async 
     { engine: "browser_use", steps: ["Selected Browser Use Cloud"] },
   );
   assert.deepEqual(
-    await choose("auto", { browserUseKey: "", kernelKey: "", jevKey: "j", searchKey: "s" }),
+    await choose("auto", { browserUseKey: "", kernelKey: "", jev: jevService({ aimlapiKey: "j" }) }),
     { engine: "tavily", steps: ["Selected Search API"] },
   );
 });
 
 test("Auto with both browsers and no JEV key uses Browser Use Cloud", async () => {
   assert.deepEqual(
-    await choose("auto", { ...allKeys, jevKey: "" }),
+    await choose("auto", { ...allKeys, jev: undefined }),
     { engine: "browser_use", steps: ["Selected Browser Use Cloud"] },
   );
 });

@@ -31,7 +31,7 @@ export async function GET(request: Request) {
             browserUse: !!config.browserUseKey,
             kernel: !!config.kernelKey,
             tavily: !!config.searchKey,
-            jev: !!config.jevKey,
+            jev: !!config.jev,
           },
         };
   return Response.json(body, { headers: { "Cache-Control": "no-store" } });

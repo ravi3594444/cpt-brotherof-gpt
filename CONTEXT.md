@@ -16,7 +16,7 @@ Scout is a mobile-first research chat. It answers a question from public web pag
 | Browser Use Cloud | A hosted browser agent that navigates sites and returns page summaries. | Browser Use session (for Kernel) |
 | Kernel | A separate hosted cloud browser that runs Scout's fixed page-reading script. | Browser Use |
 | Search API | Tavily search and page extraction, kept as a compatibility fallback. | Tavily (in UI copy), legacy search |
-| JEV | TypeSafe's hosted choice model. In Auto, it picks Kernel or Browser Use Cloud. It never answers or browses. | router model, on-device model |
+| JEV | TypeSafe's hosted choice model, reached through AI/ML API or TypeSafe. In Auto, it picks Kernel or Browser Use Cloud. It never answers or browses. | router model, on-device model |
 | Source | A validated public web page used as evidence: title, URL, content, and optionally an image. | result, link |
 | Read | True for a Source only when its content is page text a Research engine read directly. Search excerpts and browser-agent summaries are not Read. | verified |
 | Evidence | The Sources given to the Answer model, marked as page content, search excerpt, or agent observation. | context |

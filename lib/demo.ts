@@ -99,7 +99,7 @@ export function demoAnswer(
     };
   if (q === "what does scout need for live research")
     return {
-      text: "Scout needs an **OpenAI-compatible model connection** plus a **Browser Use Cloud or Kernel key** for live browser research. Connect both browser services to switch between agent navigation and faster page reading. A TypeSafe key optionally enables JEV routing between them.\n\nThe model writes the answer from retrieved evidence. Credentials stay on the server and never go into the Android wrapper.\n\nOnce connected, ask any research question, paste public page links, compare findings, and follow up in the same conversation.",
+      text: "Scout needs an **OpenAI-compatible model connection** plus a **Browser Use Cloud or Kernel key** for live browser research. Connect both browser services to switch between agent navigation and faster page reading. An AI/ML API key optionally enables JEV routing between them.\n\nThe model writes the answer from retrieved evidence. Credentials stay on the server and never go into the Android wrapper.\n\nOnce connected, ask any research question, paste public page links, compare findings, and follow up in the same conversation.",
       sources: [],
       suggestions: ["How do AI agents search the web?"],
     };

@@ -1,3 +1,5 @@
+import { jevService } from "./cloud-research.ts";
+
 // Server-only settings from environment variables: Vercel project settings, a
 // local .env file, or Cloudflare Worker variables (nodejs_compat fills
 // process.env there too). Never prefix these with NEXT_PUBLIC_.
@@ -10,7 +12,8 @@ export function serverConfig() {
     searchKey: e.TAVILY_API_KEY || "",
     browserUseKey: e.BROWSER_USE_API_KEY || "",
     kernelKey: e.KERNEL_API_KEY || "",
-    jevKey: e.TYPESAFE_API_KEY || "",
+    // JEV through AI/ML API (AIMLAPI_API_KEY) or straight from TypeSafe.
+    jev: jevService({ aimlapiKey: e.AIMLAPI_API_KEY, typesafeKey: e.TYPESAFE_API_KEY }),
     modelName: e.MODEL_DISPLAY_NAME || "Your model",
     accessCode: e.SCOUT_ACCESS_CODE || "",
   };

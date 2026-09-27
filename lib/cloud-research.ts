@@ -196,9 +196,19 @@ export async function browserUseResearch(
   }
 }
 
+// JEV answers the same choice question whether it is reached through AI/ML API
+// or straight from TypeSafe; only the address and model name differ.
+export type JevService = { key: string; url: string; model: string };
+export function jevService(keys: { aimlapiKey?: string; typesafeKey?: string }): JevService | undefined {
+  if (keys.aimlapiKey)
+    return { key: keys.aimlapiKey, url: "https://api.aimlapi.com/v1/decisions", model: "typesafe/jev" };
+  if (keys.typesafeKey)
+    return { key: keys.typesafeKey, url: "https://api.typesafe.ai/v1/systemone", model: "jev-latest" };
+}
+
 export async function jevChooseEngine(
   question: string,
-  key: string,
+  service: JevService,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
@@ -208,11 +218,11 @@ export async function jevChooseEngine(
     return "browser_use";
   };
   try {
-    const response = await fetcher("https://api.typesafe.ai/v1/systemone", {
+    const response = await fetcher(service.url, {
       method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${service.key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "jev-latest",
+        model: service.model,
         state: question.slice(0, 4000),
         questions: {
           route: {
@@ -351,7 +361,7 @@ export async function kernelResearch(
 
 export async function chooseResearchEngine(
   requested: ResearchEngine,
-  keys: { browserUseKey: string; kernelKey: string; jevKey: string },
+  keys: { browserUseKey: string; kernelKey: string; jev?: JevService },
   question: string,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
@@ -363,8 +373,8 @@ export async function chooseResearchEngine(
     return requested;
   }
   // JEV reports its own decision, or why Scout fell back, through progress.
-  if (keys.browserUseKey && keys.kernelKey && keys.jevKey)
-    return jevChooseEngine(question, keys.jevKey, signal, fetcher, progress);
+  if (keys.browserUseKey && keys.kernelKey && keys.jev)
+    return jevChooseEngine(question, keys.jev, signal, fetcher, progress);
   const engine = keys.browserUseKey ? "browser_use" : keys.kernelKey ? "kernel" : "tavily";
   progress?.(`Selected ${label[engine]}`);
   return engine;
