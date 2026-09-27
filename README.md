@@ -31,11 +31,21 @@ Put these values in the host's secret environment, not in the app bundle:
 | `MODEL_DISPLAY_NAME` | Friendly name shown in the workspace |
 | `BROWSER_USE_API_KEY` | Browser Use Cloud V4 agent and its own cloud browser |
 | `KERNEL_API_KEY` | Kernel cloud browser sessions and Playwright execution |
-| `TYPESAFE_API_KEY` | Optional JEV routing between the two browser services |
+| `AIMLAPI_API_KEY` | Optional JEV routing between the two browser services, through AI/ML API (`typesafe/jev`) |
+| `TYPESAFE_API_KEY` | The same JEV routing straight from TypeSafe (used only when `AIMLAPI_API_KEY` is not set) |
 | `TAVILY_API_KEY` | Optional legacy search/extraction fallback |
+| `VISION_MODEL_ID` | Optional model that can see, e.g. `deepseek/deepseek-v4.1-flash` on AI/ML API. It describes photos for a text-only answer model (such as Atria Dawn Preview) and drives the Vision agent's browser |
+| `VISION_MODEL_BASE_URL` | OpenAI-compatible address of the vision model; defaults to `https://api.aimlapi.com/v1` |
+| `VISION_MODEL_API_KEY` | Key for the vision model; defaults to `AIMLAPI_API_KEY` |
 | `SCOUT_ACCESS_CODE` | Optional. When set, the app and API ask for this code, so strangers who find the site cannot spend your credit |
 
-For live research, connect the model plus Browser Use **or** Kernel. The two
+For live research, connect the model plus Browser Use **or** Kernel. With
+Kernel and a vision model connected, the **Vision agent** engine lets the vision
+model drive a real Kernel browser (open, click, type into search boxes, scroll,
+read) for up to 8 steps while the answer model only writes the reply. JEV can
+choose it in Auto. For Atria Dawn Preview, use `MODEL_BASE_URL=https://api.atria-asi.ai/v1`
+and `MODEL_ID=Atria-Dawn-Preview`; Atria reads text only, so set a vision model
+for photos. The two
 browser keys together enable engine choice in the chat. JEV is optional and
 only selects the path in Auto mode. It does not browse, answer, or run locally
 on Android. The current private preview already has its answer model
@@ -125,5 +135,5 @@ logged JEV outcome, pasted-link extraction, conversation preparation, and
 legacy search error behavior. A
 TypeScript check and production build cover the UI and API. The provider
 paths cannot be tested end-to-end without the separate Browser Use, Kernel,
-and optional TypeSafe keys. Browser Use Cloud runs are capped at one US dollar
+and optional JEV (AI/ML API or TypeSafe) keys. Browser Use Cloud runs are capped at one US dollar
 per question; page summaries should always be checked against the links.

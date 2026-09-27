@@ -1,14 +1,26 @@
 import type { ResearchSource } from "./chat-types";
 import { extractPublicUrls, publicUrl, ResearchError } from "./research.ts";
 
-export type BrowserEngine = "browser_use" | "kernel";
+export type BrowserEngine = "browser_use" | "kernel" | "vision_agent";
 export type ResearchEngine = "auto" | BrowserEngine | "tavily";
 type Fetcher = typeof fetch;
 type BrowserResult = { sources: ResearchSource[]; warning?: string };
 type Progress = (description: string) => void;
 
 const browserUseBase = "https://api.browser-use.com/api/v4/runs";
-const kernelBase = "https://api.onkernel.com/browsers";
+export const kernelBase = "https://api.onkernel.com/browsers";
+export const ENGINE_LABELS: Record<Exclude<ResearchEngine, "auto">, string> = {
+  browser_use: "Browser Use Cloud",
+  kernel: "Kernel",
+  vision_agent: "Vision agent",
+  tavily: "Search API",
+};
+// What JEV weighs for each engine it may choose.
+const JEV_CRITERIA: Record<BrowserEngine, string> = {
+  kernel: "Read a public page URL or quickly search and extract a few straightforward public pages.",
+  browser_use: "Navigate complex websites, compare many pages, interact with dynamic pages, or resolve uncertain steps with a browser agent.",
+  vision_agent: "Look at pages to find things: visual or image-heavy pages, products, layouts, charts, or clicking through a site's own menus and search.",
+};
 const nap = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
     signal.throwIfAborted();
@@ -23,7 +35,7 @@ const nap = (ms: number, signal: AbortSignal) =>
     signal.addEventListener("abort", abort, { once: true });
   });
 
-async function jsonResponse<T>(response: Response, service: string): Promise<T> {
+export async function jsonResponse<T>(response: Response, service: string): Promise<T> {
   if (!response.ok)
     throw new ResearchError(
       response.status === 401 || response.status === 403
@@ -65,7 +77,7 @@ function sourceFromUnknown(value: unknown): ResearchSource | undefined {
 
 // Browser Use v4 may ignore outputSchema and return text: pure JSON, a fenced
 // JSON block after prose, or prose followed by a bare object.
-function jsonIn(text: string): unknown {
+export function jsonIn(text: string): unknown {
   const candidates = [text, ...[...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1])];
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -196,32 +208,42 @@ export async function browserUseResearch(
   }
 }
 
+// JEV answers the same choice question whether it is reached through AI/ML API
+// or straight from TypeSafe; only the address and model name differ.
+export type JevService = { key: string; url: string; model: string };
+export function jevService(keys: { aimlapiKey?: string; typesafeKey?: string }): JevService | undefined {
+  if (keys.aimlapiKey)
+    return { key: keys.aimlapiKey, url: "https://api.aimlapi.com/v1/decisions", model: "typesafe/jev" };
+  if (keys.typesafeKey)
+    return { key: keys.typesafeKey, url: "https://api.typesafe.ai/v1/systemone", model: "jev-latest" };
+}
+
 export async function jevChooseEngine(
   question: string,
-  key: string,
+  service: JevService,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
+  options: BrowserEngine[] = ["browser_use", "kernel"],
 ): Promise<BrowserEngine> {
+  // Without a usable answer, prefer the most thorough engine on offer.
+  const safest = (["browser_use", "vision_agent", "kernel"] as const).find((e) => options.includes(e))!;
   const fallback = (why: string): BrowserEngine => {
-    progress?.(`JEV was ${why}; using Browser Use Cloud`);
-    return "browser_use";
+    progress?.(`JEV was ${why}; using ${ENGINE_LABELS[safest]}`);
+    return safest;
   };
   try {
-    const response = await fetcher("https://api.typesafe.ai/v1/systemone", {
+    const response = await fetcher(service.url, {
       method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${service.key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "jev-latest",
+        model: service.model,
         state: question.slice(0, 4000),
         questions: {
           route: {
             type: "choice",
             instructions: "Choose the appropriate browser workflow for this user's research question.",
-            criteria: {
-              kernel: "Read a public page URL or quickly search and extract a few straightforward public pages.",
-              browser_use: "Navigate complex websites, compare many pages, interact with dynamic pages, or resolve uncertain steps with a browser agent.",
-            },
+            criteria: Object.fromEntries(options.map((e) => [e, JEV_CRITERIA[e]])),
           },
         },
       }),
@@ -232,14 +254,12 @@ export async function jevChooseEngine(
       answers?: { route?: { choice?: string; confidence?: number } };
     };
     const route = body.answers?.route;
-    if (route?.choice === "kernel") {
-      if ((route.confidence || 0) < 0.65) return fallback("unsure");
-      progress?.("JEV selected Kernel");
-      return "kernel";
-    }
-    if (route?.choice !== "browser_use") return fallback("unavailable");
-    progress?.("JEV selected Browser Use Cloud");
-    return "browser_use";
+    const choice = options.find((e) => e === route?.choice);
+    if (!choice) return fallback("unavailable");
+    // Kernel only reads pages; take it only when JEV is sure.
+    if (choice === "kernel" && (route?.confidence || 0) < 0.65) return fallback("unsure");
+    progress?.(`JEV selected ${ENGINE_LABELS[choice]}`);
+    return choice;
   } catch {
     signal.throwIfAborted();
     return fallback("unavailable");
@@ -351,21 +371,26 @@ export async function kernelResearch(
 
 export async function chooseResearchEngine(
   requested: ResearchEngine,
-  keys: { browserUseKey: string; kernelKey: string; jevKey: string },
+  keys: { browserUseKey: string; kernelKey: string; jev?: JevService; visionAgent?: boolean },
   question: string,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
 ): Promise<Exclude<ResearchEngine, "auto">> {
-  const label = { browser_use: "Browser Use Cloud", kernel: "Kernel", tavily: "Search API" };
   if (requested !== "auto") {
-    progress?.(`Selected ${label[requested]}`);
+    progress?.(`Selected ${ENGINE_LABELS[requested]}`);
     return requested;
   }
+  // In order of preference when JEV is not asked.
+  const available: BrowserEngine[] = [
+    ...(keys.browserUseKey ? ["browser_use" as const] : []),
+    ...(keys.visionAgent ? ["vision_agent" as const] : []),
+    ...(keys.kernelKey ? ["kernel" as const] : []),
+  ];
   // JEV reports its own decision, or why Scout fell back, through progress.
-  if (keys.browserUseKey && keys.kernelKey && keys.jevKey)
-    return jevChooseEngine(question, keys.jevKey, signal, fetcher, progress);
-  const engine = keys.browserUseKey ? "browser_use" : keys.kernelKey ? "kernel" : "tavily";
-  progress?.(`Selected ${label[engine]}`);
+  if (available.length >= 2 && keys.jev)
+    return jevChooseEngine(question, keys.jev, signal, fetcher, progress, available);
+  const engine = available[0] ?? "tavily";
+  progress?.(`Selected ${ENGINE_LABELS[engine]}`);
   return engine;
 }

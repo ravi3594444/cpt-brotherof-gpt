@@ -100,3 +100,22 @@ test("a failed answer with photos says the model may not read photos", () => {
   assert.doesNotMatch(answerErrorMessage({ photos: 0, aborted: false }), /photo/);
   assert.match(answerErrorMessage({ photos: 1, aborted: true }), /stopped or timed out/);
 });
+
+// ---- Photos described by the vision helper ----
+import { withPhotoDescription } from "../lib/conversation.ts";
+
+test("the conversation hands back the photos it will send, for the vision helper", () => {
+  const { images } = modelConversation([withPhotos("What is this?", photo(jpeg("QUJD")))]);
+  assert.deepEqual(images, [{ image: "QUJD", mediaType: "image/jpeg" }]);
+});
+
+test("a text-only answer model gets the helper's description instead of the photos", () => {
+  const { messages } = modelConversation([user("Hi"), assistant("Hello."), withPhotos("What plant is this?", photo(jpeg("QUJD")))]);
+  const described = withPhotoDescription(messages, "A potted fern.");
+  assert.deepEqual(described.slice(0, 2), messages.slice(0, 2));
+  assert.equal(typeof described[2].content, "string");
+  assert.match(described[2].content, /^What plant is this\?/);
+  assert.match(described[2].content, /A potted fern\./);
+  assert.match(described[2].content, /cannot see/i);
+  assert.equal(JSON.stringify(described).includes("QUJD"), false);
+});

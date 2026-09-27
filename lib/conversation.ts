@@ -33,9 +33,10 @@ export function modelConversation(turns: ChatTurn[]): {
   messages: ModelMessage[];
   question: string;
   photos: number;
+  images: Array<{ image: string; mediaType: string }>;
 } {
   const photoTurn = lastPhotoTurn(turns);
-  let photos = 0;
+  let images: Array<{ image: string; mediaType: string }> = [];
   const messages = turns
     .map((m, i) => {
       const text = m.parts
@@ -44,10 +45,11 @@ export function modelConversation(turns: ChatTurn[]): {
         .join("")
         .slice(0, 16000);
       if (i !== photoTurn) return { text, message: { role: m.role, content: text } as ModelMessage };
-      const images = m.parts.filter(isPhoto);
-      if (images.length > MAX_PHOTOS) throw new PhotoError(`Add up to ${MAX_PHOTOS} photos per question.`);
-      photos = images.length;
-      const content = [{ type: "text" as const, text }, ...images.map(photoImage)];
+      const photoParts = m.parts.filter(isPhoto);
+      if (photoParts.length > MAX_PHOTOS) throw new PhotoError(`Add up to ${MAX_PHOTOS} photos per question.`);
+      const imageParts = photoParts.map(photoImage);
+      images = imageParts.map(({ image, mediaType }) => ({ image, mediaType }));
+      const content = [{ type: "text" as const, text }, ...imageParts];
       return { text, message: { role: "user", content } as ModelMessage };
     })
     // A turn with no text and no photos (an answer that failed before writing)
@@ -60,7 +62,19 @@ export function modelConversation(turns: ChatTurn[]): {
     last?.role === "user"
       ? last.parts.filter((p) => p.type === "text").map((p) => p.text || "").join("").trim()
       : "";
-  return { messages, question, photos };
+  return { messages, question, photos: images.length, images };
+}
+
+/** For an answer model that reads text only: replace the photos with the vision helper's description. */
+export function withPhotoDescription(messages: ModelMessage[], description: string): ModelMessage[] {
+  return messages.map((m) => {
+    if (m.role !== "user" || typeof m.content === "string") return m;
+    const text = m.content.map((p) => (p.type === "text" ? p.text : "")).join("");
+    return {
+      role: "user",
+      content: `${text}\n\n[The user attached photos, which you cannot see. A vision model described them:]\n${description}`,
+    };
+  });
 }
 
 /** What the browser sends: text for every recent turn, photos only for the latest photo question. */

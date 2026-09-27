@@ -442,6 +442,29 @@ try {
     await context.close();
   }
   {
+    // With Kernel and a vision model connected, the vision agent is a research engine.
+    const context = await browser.newContext({ viewport: PHONE });
+    const page = await context.newPage();
+    await page.route("**/api/config", (route) => route.fulfill({ json: {
+      access: "open", demo: false, modelConnected: true, searchConnected: true, modelName: "Atria Dawn Preview",
+      engines: { browserUse: true, kernel: true, visionAgent: true, tavily: false, jev: true, vision: true },
+    } }));
+    const bodies = [];
+    await page.route("**/api/chat", (route) => {
+      bodies.push(JSON.parse(route.request().postData()));
+      return route.fulfill({ status: 503, body: "stubbed" });
+    });
+    await page.goto(BASE, { waitUntil: "networkidle" });
+    await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+    await (await menuItem(page, "menuitemradio", "Vision agent")).click();
+    await page.getByRole("textbox").fill("Which fern suits a shady balcony?");
+    await page.getByRole("textbox").press("Enter");
+    await page.waitForSelector(".error-banner", { timeout: 10000 });
+    check("the vision agent can be chosen in the + menu and is sent as the engine", bodies[0]?.engine === "vision_agent",
+      JSON.stringify(bodies[0]?.engine));
+    await context.close();
+  }
+  {
     // Turning web search off must survive sending a typed question.
     const { context, page } = await open();
     const bodies = [];

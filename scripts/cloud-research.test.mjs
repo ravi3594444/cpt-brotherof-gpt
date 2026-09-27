@@ -3,6 +3,7 @@ import {
   browserUseResearch,
   kernelResearch,
   jevChooseEngine,
+  jevService,
   parseAgentSources,
 } from "../lib/cloud-research.ts";
 
@@ -63,7 +64,7 @@ const jevFetch = async (_url, init) => {
   assert.equal(JSON.parse(init.body).questions.route.type, "choice");
   return Response.json({ answers: { route: { choice: "kernel", confidence: 0.88 } } });
 };
-assert.equal(await jevChooseEngine("open this link", "jev-test-key", signal, jevFetch), "kernel");
+assert.equal(await jevChooseEngine("open this link", jevService({ typesafeKey: "jev-test-key" }), signal, jevFetch), "kernel");
 assert.equal(
   parseAgentSources(null, '{"sources":[{"url":"https://example.com/page","title":"Title","summary":"Evidence"}]}').length,
   1,

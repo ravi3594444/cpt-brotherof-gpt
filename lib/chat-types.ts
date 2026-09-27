@@ -12,7 +12,7 @@ export type ResearchData = {
   sources: ResearchSource[];
   demo: boolean;
   warning?: string;
-  engine?: "browser_use" | "kernel" | "tavily";
+  engine?: "browser_use" | "kernel" | "vision_agent" | "tavily";
   steps?: string[];
 };
 export type ScoutMessage = UIMessage<
@@ -26,7 +26,16 @@ export type ScoutConfig = {
   modelConnected: boolean;
   searchConnected: boolean;
   modelName: string;
-  engines: { browserUse: boolean; kernel: boolean; tavily: boolean; jev: boolean };
+  engines: {
+    browserUse: boolean;
+    kernel: boolean;
+    // A vision model driving a Kernel browser; needs both keys.
+    visionAgent: boolean;
+    tavily: boolean;
+    jev: boolean;
+    // A vision model for photos and the vision agent.
+    vision: boolean;
+  };
 };
 export type LocalThread = {
   id: string;
