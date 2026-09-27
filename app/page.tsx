@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { nanoid } from "nanoid";
 import { Chat, useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { DefaultChatTransport, type FileUIPart } from "ai";
 import {
   ArrowUp,
   ArrowUpRight,
@@ -26,6 +26,7 @@ import {
   Sparkles,
   Square,
   Trash2,
+  X,
   GitCompareArrows,
 } from "lucide-react";
 import {
@@ -59,6 +60,7 @@ import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -83,8 +85,11 @@ import {
   PromptInputTextarea,
   PromptInputSubmit,
   PromptInputFooter,
+  usePromptInputAttachments,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
+import { MAX_PHOTOS, requestTurns } from "@/lib/conversation";
+import { historyPhotoUrl, preparePhoto } from "@/lib/photos";
 import {
   DEMO_QUESTION,
   PHOTO_SAMPLE,
@@ -103,6 +108,60 @@ const STORAGE_KEY = "scout-threads-v1";
 // Show every source as a card, up to the most any research engine returns.
 const MAX_SOURCE_CARDS = 8;
 type Suggestion = (typeof SUGGESTIONS)[number] | typeof PHOTO_SAMPLE;
+const PHOTO_ONLY_QUESTION = "What's in this photo?";
+// Photos waiting in the question box, before they are sent.
+function ComposerPhotos() {
+  const { files, remove } = usePromptInputAttachments();
+  if (!files.length) return null;
+  return (
+    <div className="composer-photos" role="list" aria-label="Attached photos">
+      {files.map((file) => (
+        <div className="composer-photo" role="listitem" key={file.id}>
+          {/* eslint-disable-next-line @next/next/no-img-element -- a local blob preview */}
+          <img src={file.url} alt={file.filename || "Attached photo"} />
+          <button type="button" aria-label="Remove photo" onClick={() => remove(file.id)}>
+            <X size={13} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+// Unlike AI Elements' own item, this lets the menu close so the photos are not hidden behind it.
+function AddPhotosItem() {
+  const { openFileDialog } = usePromptInputAttachments();
+  return (
+    <DropdownMenuItem onSelect={() => openFileDialog()}>
+      <ImageIcon size={16} />
+      Add photos
+    </DropdownMenuItem>
+  );
+}
+// Sending is allowed with typed text, attached photos, or both.
+function ComposerSend({
+  busy,
+  hasText,
+  status,
+  onStop,
+}: {
+  busy: boolean;
+  hasText: boolean;
+  status: React.ComponentProps<typeof PromptInputSubmit>["status"];
+  onStop: () => void;
+}) {
+  const { files } = usePromptInputAttachments();
+  return (
+    <PromptInputSubmit
+      status={status}
+      onStop={onStop}
+      disabled={!busy && !hasText && !files.length}
+      className="send-button"
+      aria-label={busy ? "Stop research" : "Send question"}
+    >
+      {busy ? <Square size={14} fill="currentColor" /> : <ArrowUp size={19} />}
+    </PromptInputSubmit>
+  );
+}
 function SuggestionIcon({ icon }: { icon: Suggestion["icon"] }) {
   if (icon === "globe") return <Globe2 size={16} />;
   if (icon === "compare") return <GitCompareArrows size={16} />;
@@ -187,9 +246,13 @@ export default function Home() {
     const title = messageText(
       messages.find((m) => m.role === "user") || messages[0],
     ).slice(0, 80);
+    const stored = messages.map((m) => ({
+      ...m,
+      parts: m.parts.map((p) => (p.type === "file" ? { ...p, url: historyPhotoUrl(p.url) } : p)),
+    }));
     setThreads((prev) =>
       [
-        { id, title, messages, updatedAt: Date.now() },
+        { id, title, messages: stored, updatedAt: Date.now() },
         ...prev.filter((t) => t.id !== id),
       ].slice(0, 30),
     );
@@ -507,11 +570,7 @@ function ChatWorkspace({
           prepareSendMessagesRequest: ({ messages, body }) => ({
             body: {
               ...body,
-              messages: messages.slice(-16).map((m) => ({
-                id: m.id,
-                role: m.role,
-                parts: m.parts.filter((p) => p.type === "text"),
-              })),
+              messages: requestTurns(messages),
             },
           }),
         }),
@@ -535,14 +594,29 @@ function ChatWorkspace({
     [chat, id, onSave],
   );
   const submit = useCallback(
-    (text: string, options?: { webEnabled?: boolean }) => {
+    async (text: string, options: { webEnabled?: boolean; files?: FileUIPart[] } = {}) => {
       const clean = text.trim();
-      if (!clean || chat.status === "submitted" || chat.status === "streaming") return;
+      const attached = (options.files ?? []).slice(0, MAX_PHOTOS);
+      if ((!clean && !attached.length) || chat.status === "submitted" || chat.status === "streaming") return;
+      let files: FileUIPart[];
+      try {
+        files = await Promise.all(attached.map(preparePhoto));
+      } catch (error) {
+        toast.error("That photo could not be opened. Try a JPEG, PNG, or WebP photo.");
+        throw error; // PromptInput keeps the photos so the user can retry.
+      }
       clearError();
       setInput("");
       return sendMessage(
-        { text: clean },
-        { body: { webEnabled, preview, engine, ...options } },
+        { text: clean || PHOTO_ONLY_QUESTION, ...(files.length ? { files } : {}) },
+        {
+          body: {
+            // A photo with no typed words has nothing to search the web for.
+            webEnabled: clean ? (options.webEnabled ?? webEnabled) : false,
+            preview,
+            engine,
+          },
+        },
       );
     },
     [chat, sendMessage, clearError, webEnabled, preview, engine],
@@ -635,13 +709,23 @@ function ChatWorkspace({
   };
   const composer = (
     <PromptInput
-      onSubmit={({ text }: PromptInputMessage) => submit(text)}
+      onSubmit={({ text, files }: PromptInputMessage) => submit(text, { files })}
       className="composer"
-      maxFiles={0}
-      onError={() =>
-        toast("Paste a page URL into your question to research it.")
+      accept="image/jpeg,image/png,image/webp"
+      multiple
+      maxFiles={MAX_PHOTOS}
+      maxFileSize={20 * 1024 * 1024}
+      onError={({ code }) =>
+        toast(
+          code === "max_files"
+            ? `Add up to ${MAX_PHOTOS} photos per question.`
+            : code === "max_file_size"
+              ? "Photos can be up to 20 MB."
+              : "Scout accepts JPEG, PNG, and WebP photos.",
+        )
       }
     >
+      <ComposerPhotos />
       <PromptInputTextarea
         aria-label={messages.length ? "Ask a follow-up" : "Ask Scout anything"}
         placeholder={messages.length ? "Ask a follow-up" : "Ask anything"}
@@ -658,6 +742,8 @@ function ChatWorkspace({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" side="top" sideOffset={10} className="composer-menu">
+              <AddPhotosItem />
+              <DropdownMenuSeparator />
               <DropdownMenuCheckboxItem
                 checked={preview || config.demo}
                 disabled={config.demo}
@@ -701,22 +787,15 @@ function ChatWorkspace({
             <span>Web</span>
           </button>
         </div>
-        <PromptInputSubmit
+        <ComposerSend
+          busy={busy}
+          hasText={!!input.trim()}
           status={status}
           onStop={() => {
             void stop();
             toast("Research stopped");
           }}
-          disabled={!busy && !input.trim()}
-          className="send-button"
-          aria-label={busy ? "Stop research" : "Send question"}
-        >
-          {busy ? (
-            <Square size={14} fill="currentColor" />
-          ) : (
-            <ArrowUp size={19} />
-          )}
-        </PromptInputSubmit>
+        />
       </PromptInputFooter>
     </PromptInput>
   );
@@ -772,6 +851,18 @@ function ChatWorkspace({
                       key={message.id}
                       className="user-message"
                     >
+                      {message.parts.some((p) => p.type === "file") && (
+                        <div className="user-photos">
+                          {message.parts.map((p, i) =>
+                            p.type !== "file" ? null : p.url ? (
+                              // eslint-disable-next-line @next/next/no-img-element -- the user's own photo
+                              <img key={i} src={p.url} alt={p.filename || "Attached photo"} />
+                            ) : (
+                              <span key={i} className="photo-placeholder">Photo</span>
+                            ),
+                          )}
+                        </div>
+                      )}
                       <MessageContent className="!text-base !leading-7 !rounded-2xl">
                         {text}
                       </MessageContent>

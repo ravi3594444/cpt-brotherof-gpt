@@ -1,9 +1,18 @@
 import type { ResearchSource } from "./chat-types";
-export function demoAnswer(question: string): {
+export function demoAnswer(
+  question: string,
+  { photos = 0 }: { photos?: number } = {},
+): {
   text: string;
   sources: ResearchSource[];
   suggestions: string[];
 } {
+  if (photos)
+    return {
+      text: "**Sample mode can't look at photos.** Prepared answers only cover the example questions. Connect an AI model that reads images, then ask about your photo again.",
+      sources: [],
+      suggestions: ["How do AI agents search the web?", "Show me a photo source card"],
+    };
   const q = question.toLowerCase().replace(/[?.!]/g, "").trim();
   if (q === "show me a photo source card")
     return {

@@ -32,3 +32,9 @@ test("every prepared answer reads cleanly with web search off", () => {
   ])
     assert.doesNotMatch(withoutCitations(demoAnswer(question).text), /\[\d+\]|\]\(https?:/, question);
 });
+
+test("sample mode says plainly that it cannot look at photos", () => {
+  const answer = demoAnswer("What is in this photo?", { photos: 1 });
+  assert.match(answer.text, /can.t look at photos/);
+  assert.equal(answer.sources.length, 0);
+});

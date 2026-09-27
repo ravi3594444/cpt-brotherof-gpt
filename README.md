@@ -12,9 +12,12 @@ mode is clearly marked and never claims to browse. Turn Sample off to use the
 connected model for ordinary chat. Live browser research becomes available
 after adding at least one browser service key to the server.
 
-The interface supports new chats, follow-ups, device-local history, source
-cards, an image when a source provides one, citations, copy-with-sources, and
-stop generation. The responsive layout is designed for Android-sized screens.
+The interface supports new chats, follow-ups, device-local history, a
+sideways row with a card for every source (with the page's picture when it
+has one), citations, copy-with-sources, stop generation, and up to four photos
+per question for the answer model. A short logo intro plays when the app
+opens (skipped with a tap, or when the device asks for reduced motion). The
+layout is phone-first, like ChatGPT's home screen, for the Android app.
 
 ## Server configuration
 
@@ -56,8 +59,10 @@ pnpm build
 ```
 
 With `pnpm dev` running, `pnpm test:browser` drives sample mode in Chromium:
-answers, citations, history, Try again, the composer switches, a stubbed
-connected workspace, and the layout at desktop and phone sizes. It needs no
+the logo intro, the home screen, answers, citations, a six-source card row,
+photos (attach, limit, shrink, thumbnails), history, Try again, the + menu and
+Web chip, a stubbed connected workspace, and the layout at desktop and phone
+sizes. It needs no
 keys and uses Playwright from the project or a global install.
 
 `CONTEXT.md` is the glossary of Scout's domain terms.

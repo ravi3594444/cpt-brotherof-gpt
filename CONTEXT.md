@@ -26,7 +26,9 @@ Scout is a mobile-first research chat. It answers a question from public web pag
 | Live chat | The Answer model with Search the web off or no Research engine connected. It gives no Citations. | chat mode |
 | Search the web | The composer switch that decides whether Research runs before the Answer. | web mode |
 | Workspace | One Scout deployment and the server keys it has connected. | account, project |
-| Source card | A compact tile for one Source under an Answer, with its image if it has one. | preview card |
+| Source card | A tile for one Source in the sideways row under an Answer, with the page's picture if it has one. | preview card |
+| Photo | A JPEG, PNG, or WebP picture the user attaches to a Question, up to 4. Only the Answer model sees it; Research uses the typed words. | image upload, attachment |
+| Suggestion chip | A suggested first Question on the home screen. | prompt card |
 | Behind the answer | The panel listing every Source of an Answer with its content. | reader, source drawer |
 | Follow-up suggestion | A suggested next Question shown after a Sample mode Answer. | prompt chip |
 | Phone browser track | The planned native Android browser and on-device model. It is not built. | Android app (for the wrapper) |

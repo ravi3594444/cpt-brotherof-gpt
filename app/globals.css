@@ -442,6 +442,58 @@ h1 {
   opacity: 0.45;
   pointer-events: none;
 }
+.composer-photos {
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px 0;
+  overflow-x: auto;
+}
+.composer-photo {
+  position: relative;
+  flex: none;
+  width: 64px;
+  height: 64px;
+}
+.composer-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 1px solid #3d433b;
+}
+.composer-photo button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #eef1e9;
+  color: #1b1e1b;
+}
+.user-photos {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.user-photos img,
+.photo-placeholder {
+  width: 112px;
+  height: 112px;
+  object-fit: cover;
+  border-radius: 14px;
+  border: 1px solid #3d433b;
+}
+.photo-placeholder {
+  display: grid;
+  place-items: center;
+  color: #8f9a88;
+  font-size: 12px;
+}
 .composer-menu {
   min-width: 250px;
   padding: 6px !important;

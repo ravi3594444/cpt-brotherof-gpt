@@ -7,6 +7,7 @@
 // Set SMOKE_SCREENSHOTS=<dir> to save screenshots.
 import { createRequire } from "node:module";
 import { execSync } from "node:child_process";
+import { crc32, deflateSync } from "node:zlib";
 
 function loadPlaywright() {
   for (const base of [import.meta.url, execSync("npm root -g").toString().trim() + "/"]) {
@@ -61,6 +62,41 @@ const stream = (chunks) => ({
   headers: { "content-type": "text/event-stream", "x-vercel-ai-ui-message-stream": "v1" },
   body: chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n",
 });
+// A solid-colour PNG, for attaching photos without fixture files.
+function png(width, height, [r, g, b]) {
+  const row = Buffer.alloc(width * 3 + 1);
+  for (let x = 0; x < width; x++) row.set([r, g, b], 1 + x * 3);
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const size = Buffer.alloc(4);
+    size.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([size, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header.set([8, 2, 0, 0, 0], 8);
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.concat(Array.from({ length: height }, () => row)))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+const photoFile = (name, w, h, rgb) => ({ name, mimeType: "image/png", buffer: png(w, h, rgb) });
+async function addPhotos(page, files) {
+  const chooser = page.waitForEvent("filechooser");
+  await (await menuItem(page, "menuitem", "Add photos")).click();
+  await (await chooser).setFiles(files);
+}
+const imageSize = (page, url) => page.evaluate(async (src) => {
+  const img = new Image();
+  img.src = src;
+  await img.decode();
+  return { width: img.naturalWidth, height: img.naturalHeight };
+}, url);
 const pixel = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="5"><rect width="8" height="5" fill="#8a6"/></svg>');
 
 try {
@@ -179,6 +215,67 @@ try {
     await shot(page, "many-sources-phone");
     check("no console or page errors", errors.length === 0, errors.join(" | "));
     await context.close();
+  }
+  {
+    // Photos: pick through the + menu, preview, limit, shrink, show, and keep only thumbnails.
+    const { context, page, errors } = await open(PHONE);
+    const bodies = [];
+    page.on("request", (r) => r.url().endsWith("/api/chat") && bodies.push(JSON.parse(r.postData())));
+    await addPhotos(page, [photoFile("big.png", 3000, 2000, [200, 40, 40]), photoFile("small.png", 800, 600, [40, 40, 200])]);
+    await page.waitForFunction(() => document.querySelectorAll(".composer-photo").length === 2, null, { timeout: 5000 }).catch(() => {});
+    check("photos chosen from the + menu show as previews in the question box", (await page.locator(".composer-photo").count()) === 2);
+    await page.locator(".composer-photo").nth(1).getByRole("button", { name: "Remove photo" }).click();
+    check("  a preview can be removed", (await page.locator(".composer-photo").count()) === 1);
+    await addPhotos(page, Array.from({ length: 4 }, (_, i) => photoFile(`p${i}.png`, 400, 300, [40, 160, 40])));
+    await page.waitForTimeout(300);
+    const limitToast = await page.getByText("Add up to 4 photos per question.").isVisible().catch(() => false);
+    check("  at most 4 photos, with a message when there are more", (await page.locator(".composer-photo").count()) === 4 && limitToast);
+    await shot(page, "photos-attached");
+    await page.getByRole("textbox").fill("What colour are these?");
+    await page.getByRole("textbox").press("Enter");
+    await finished(page);
+    const sent = bodies[0]?.messages.at(-1).parts.filter((p) => p.type === "file") || [];
+    const first = sent[0] ? await imageSize(page, sent[0].url) : null;
+    check("sent photos are shrunk JPEGs, the largest side at most 1280 px",
+      sent.length === 4 && sent.every((p) => p.mediaType === "image/jpeg" && p.url.startsWith("data:image/jpeg;base64,")) &&
+        first?.width === 1280 && first?.height === 853, JSON.stringify({ count: sent.length, first }));
+    check("  the question shows its photos", (await page.locator(".user-message .user-photos img").count()) === 4);
+    check("  the question box is empty again", (await page.locator(".composer-photo").count()) === 0);
+    check("  sample mode says it can't look at photos", /can.t look at photos/.test(await page.locator(".answer-body").innerText()));
+    await shot(page, "photos-sent");
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("scout-threads-v1") || "[]")[0]?.messages[0]?.parts.filter((p) => p.type === "file").map((p) => p.url) || []);
+    const thumb = stored[0] ? await imageSize(page, stored[0]) : null;
+    check("  history keeps only small thumbnails", stored.length === 4 && stored.every((u) => u.length < 40000) && thumb?.width === 200,
+      JSON.stringify({ count: stored.length, thumb, longest: Math.max(0, ...stored.map((u) => u.length)) }));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // A photo with no words: asks what is in it and skips web search.
+    const { context, page } = await open(PHONE);
+    const bodies = [];
+    page.on("request", (r) => r.url().endsWith("/api/chat") && bodies.push(JSON.parse(r.postData())));
+    await addPhotos(page, [photoFile("only.png", 640, 480, [90, 90, 20])]);
+    await page.waitForSelector(".composer-photo");
+    await page.getByRole("button", { name: "Send question" }).click();
+    await finished(page);
+    const last = bodies[0]?.messages.at(-1);
+    check("a photo sent with no words asks what's in it, without web search",
+      last?.parts.some((p) => p.type === "text" && p.text === "What's in this photo?") && bodies[0]?.webEnabled === false,
+      JSON.stringify({ webEnabled: bodies[0]?.webEnabled, parts: last?.parts.map((p) => p.type) }));
+    await context.close();
+  }
+  {
+    const response = await fetch(new URL("/api/chat", BASE), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preview: true, messages: [{ role: "user", parts: [
+        { type: "file", mediaType: "image/gif", url: "data:image/gif;base64,R0lGODlh" },
+        { type: "text", text: "What is this?" },
+      ] }] }),
+    });
+    check("the server turns away a GIF with a clear message",
+      response.status === 400 && /JPEG, PNG, or WebP/.test(await response.text()), String(response.status));
   }
   {
     const { context, page, errors } = await open();
