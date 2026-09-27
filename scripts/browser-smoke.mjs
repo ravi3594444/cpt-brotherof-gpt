@@ -96,13 +96,13 @@ const LIVE_CONFIG = {
   access: "open", demo: false, modelConnected: true, searchConnected: true, modelName: "Test model",
   engines: { browserUse: false, kernel: true, visionAgent: false, tavily: false, jev: false, vision: false },
 };
-async function openHeld() {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+async function openHeld({ viewport = { width: 1280, height: 800 }, config = () => LIVE_CONFIG } = {}) {
+  const context = await browser.newContext({ viewport });
   await context.addInitScript(heldAnswers);
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.route("**/api/config", (route) => route.fulfill({ json: LIVE_CONFIG }));
+  await page.route("**/api/config", (route) => route.fulfill({ json: config() }));
   await page.goto(BASE, { waitUntil: "networkidle" });
   await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
   return { context, page, errors };
@@ -598,15 +598,36 @@ try {
     // A reload ends a running answer; the words written so far stay.
     const { context, page, errors } = await openHeld();
     const question = "What happens on a reload?";
+    await page.evaluate(() => {
+      const setItem = Storage.prototype.setItem;
+      window.__writes = {};
+      Storage.prototype.setItem = function (key, value) {
+        window.__writes[key] = (window.__writes[key] || 0) + 1;
+        return setItem.call(this, key, value);
+      };
+    });
     await askHeld(page, question);
     await sendHeld(page, question, writeText("The first half of an answer"));
     await page.locator(".answer-body", { hasText: "The first half of an answer" }).waitFor({ timeout: 5000 });
+    await page.evaluate(() => (window.__writes = {}));
+    for (let i = 1; i <= 4; i++) {
+      await page.waitForTimeout(600);
+      await sendHeld(page, question, [{ type: "text-delta", id: "a", delta: `, part ${i}` }]);
+    }
+    const writes = await page.evaluate(() => window.__writes);
+    check("an answer that streams is saved on its own each second, without rewriting the whole history",
+      !writes["scout-threads-v1"] && writes["scout-drafts-v1"] >= 2, JSON.stringify(writes));
     await page.reload({ waitUntil: "networkidle" });
     await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
     await conversationItem(page, question).click();
-    const kept = await page.locator(".answer-body", { hasText: "The first half of an answer" })
+    const kept = await page.locator(".answer-body", { hasText: "The first half of an answer, part 1, part 2, part 3, part 4" })
       .waitFor({ timeout: 5000 }).then(() => true, () => false);
-    check("a reload mid-answer keeps the words written so far", kept && (await page.locator(".assistant-message").count()) === 1);
+    check("a reload mid-answer keeps the words written so far", kept && (await page.locator(".assistant-message").count()) === 1,
+      await page.locator(".conversation").innerText());
+    const storage = await page.evaluate(() => ({
+      history: localStorage.getItem("scout-threads-v1") || "", drafts: localStorage.getItem("scout-drafts-v1"),
+    }));
+    check("  and moves them into the saved history", storage.history.includes("part 4") && storage.drafts === null, JSON.stringify(storage.drafts));
     check("  and shows no spinner, since the reload ended it", (await page.locator('.scout-sidebar [aria-label="Still answering"]').count()) === 0);
     check("no console or page errors", errors.length === 0, errors.join(" | "));
     await context.close();
@@ -631,10 +652,130 @@ try {
     await page.keyboard.press("Escape");
     const aborted = await page.waitForFunction((q) => window.__answers[q].aborted, question, { timeout: 5000 }).then(() => true, () => false);
     await page.waitForTimeout(1500);
-    const stored = await page.evaluate(() => localStorage.getItem("scout-threads-v1") || "");
+    const stored = await page.evaluate(() => (localStorage.getItem("scout-threads-v1") || "") + (localStorage.getItem("scout-drafts-v1") || ""));
     check("deleting a conversation with a running answer stops the answer",
       aborted && (await conversationItem(page, question).count()) === 0 && !stored.includes(question),
       JSON.stringify({ aborted, stored: stored.slice(0, 120) }));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // Many answers at once on a short window, and Try again in an older conversation.
+    const { context, page, errors } = await openHeld({ viewport: { width: 1280, height: 600 } });
+    const listed = page.locator(".nav-section .history-item");
+    const older = "A long research question";
+    await askHeld(page, older);
+    const others = Array.from({ length: 8 }, (_, i) => `Another question ${i + 1}`);
+    for (const question of others) {
+      await page.getByRole("button", { name: /New conversation/ }).click();
+      await askHeld(page, question);
+    }
+    check("a running answer below the first 8 conversations still shows in the list, with its spinner",
+      (await listed.count()) === 9 && (await answering(page, older).isVisible()), JSON.stringify(await listed.allInnerTexts()));
+
+    await page.getByRole("button", { name: "Close sidebar" }).click();
+    await page.waitForTimeout(450);
+    const rail = page.locator(".sidebar-rail");
+    const railRunning = rail.getByRole("button", { name: /^Still answering: / });
+    const settings = await rail.getByRole("button", { name: "Workspace settings" }).boundingBox();
+    await railRunning.last().scrollIntoViewIfNeeded();
+    const lastRunning = await railRunning.last().boundingBox();
+    check("on a short window, the folded rail keeps Workspace settings on screen and scrolls its running answers",
+      (await railRunning.count()) === 9 && settings && settings.y + settings.height <= 600 &&
+        lastRunning && lastRunning.y >= 0 && lastRunning.y + lastRunning.height <= settings.y,
+      JSON.stringify({ count: await railRunning.count(), settings, lastRunning }));
+    await shot(page, "answering-rail-short");
+    await page.getByRole("button", { name: "Open sidebar" }).click();
+    await page.waitForTimeout(450);
+
+    for (const question of others) await sendHeld(page, question, [...writeText("Done."), ...finishText], true);
+    await sendHeld(page, older, [{ type: "error", errorText: "The research engine stopped responding." }], true);
+    await answering(page, older).waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
+    const belowTheList = (await listed.count()) === 8 && (await conversationItem(page, older).count()) === 0;
+    await page.keyboard.press("Control+k");
+    await page.locator(".history-dialog-item button", { hasText: older }).click();
+    await page.evaluate((q) => (window.__answers[q].old = true), older);
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.waitForFunction((q) => !window.__answers[q].old, older);
+    await page.getByRole("button", { name: /New conversation/ }).click();
+    await page.waitForSelector(".suggestion-chip");
+    const top = listed.first();
+    check("Try again in an older conversation moves it to the top of the list, with a spinner while it runs",
+      belowTheList && (await top.innerText()).includes(older) &&
+        (await top.getByRole("img", { name: "Still answering" }).isVisible()),
+      JSON.stringify({ belowTheList, listed: await listed.allInnerTexts() }));
+    await sendHeld(page, older, [...writeText("Found it."), ...finishText], true);
+    const done = await top.getByRole("img", { name: "Still answering" })
+      .waitFor({ state: "detached", timeout: 5000 }).then(() => true, () => false);
+    check("  and it stays there once the answer is done", done && (await top.innerText()).includes(older));
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // When the browser cannot save, one message says so, not one every few seconds.
+    const { context, page, errors } = await openHeld();
+    await page.evaluate(() => {
+      const setItem = Storage.prototype.setItem;
+      window.__storageFull = true;
+      Storage.prototype.setItem = function (key, value) {
+        if (window.__storageFull && key.startsWith("scout-")) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+        return setItem.call(this, key, value);
+      };
+      window.__saveToasts = 0;
+      let shown = false;
+      setInterval(() => {
+        const now = [...document.querySelectorAll("[data-sonner-toast]")]
+          .some((el) => el.dataset.removed !== "true" && /could not save/.test(el.textContent));
+        if (now && !shown) window.__saveToasts++;
+        shown = now;
+      }, 50);
+    });
+    const question = "A long answer on a full device";
+    const more = (text) => sendHeld(page, question, [{ type: "text-delta", id: "a", delta: text }]);
+    await askHeld(page, question);
+    await sendHeld(page, question, writeText("Words"));
+    // Research runs a while with nothing new to save, and the message closes on its own.
+    await page.waitForTimeout(6000);
+    for (let i = 0; i < 4; i++) {
+      await more(` ${i}`);
+      await page.waitForTimeout(450);
+    }
+    const whileFull = await page.evaluate(() => window.__saveToasts);
+    check("when the browser cannot save, it says so once while an answer streams", whileFull === 1, `${whileFull} messages`);
+    await page.evaluate(() => (window.__storageFull = false));
+    await sendHeld(page, question, finishText, true);
+    await page.waitForSelector(".answer-actions", { timeout: 5000 });
+    await page.waitForTimeout(300);
+    await page.evaluate(() => (window.__storageFull = true));
+    await askHeld(page, "And a follow-up on a full device");
+    await page.waitForTimeout(500);
+    const again = await page.evaluate(() => window.__saveToasts);
+    check("  and again when saving fails after it has worked", again === 2, `${again} messages`);
+    await sendHeld(page, "And a follow-up on a full device", [...writeText("Done."), ...finishText], true);
+    check("no console or page errors", errors.length === 0, errors.join(" | "));
+    await context.close();
+  }
+  {
+    // Forgetting the access code stops every running answer, and keeps what each has written.
+    let locked = false;
+    const { context, page, errors } = await openHeld({
+      config: () => ({ ...LIVE_CONFIG, ...(locked ? { access: "required", modelConnected: false, searchConnected: false } : { access: "granted" }) }),
+    });
+    await askHeld(page, "First answer to stop");
+    await sendHeld(page, "First answer to stop", writeText("Half of the first answer"));
+    await page.getByRole("button", { name: /New conversation/ }).click();
+    await askHeld(page, "Second answer to stop");
+    locked = true;
+    await page.locator(".workspace-button").click();
+    await page.getByRole("button", { name: "Forget" }).click();
+    const gated = await page.getByRole("heading", { name: "Enter your access code" })
+      .waitFor({ timeout: 5000 }).then(() => true, () => false);
+    const stopped = await page.waitForFunction(() => Object.values(window.__answers).every((a) => a.aborted), null, { timeout: 5000 })
+      .then(() => true, () => false);
+    const stored = await page.evaluate(() => localStorage.getItem("scout-threads-v1") || "");
+    check("Forget access code stops every running answer and keeps the words written so far",
+      gated && stopped && stored.includes("Half of the first answer") && stored.includes("Second answer to stop"),
+      JSON.stringify({ gated, stopped, stored: stored.slice(0, 160) }));
     check("no console or page errors", errors.length === 0, errors.join(" | "));
     await context.close();
   }

@@ -97,7 +97,8 @@ import { MAX_PHOTOS, requestTurns } from "@/lib/conversation";
 import { ACCESS_HEADER } from "@/lib/access";
 import { historyPhotoUrl, preparePhoto } from "@/lib/photos";
 import { SIDEBAR_BOOT_ATTRIBUTE, readSidebarOpen, saveSidebarOpen } from "@/lib/sidebar";
-import { createChatRegistry, type ChatRegistry } from "@/lib/chat-registry";
+import { createChatRegistry, type ChatRegistry, type SaveInfo } from "@/lib/chat-registry";
+import { applyDrafts, pendingDrafts, readDrafts, type Drafts } from "@/lib/history-drafts";
 import {
   DEMO_QUESTION,
   PHOTO_SAMPLE,
@@ -113,6 +114,23 @@ import {
 } from "@/lib/chat-types";
 
 const STORAGE_KEY = "scout-threads-v1";
+// Answers still being written, saved apart from the history (see lib/history-drafts.ts).
+const DRAFTS_KEY = "scout-drafts-v1";
+let drafts: Drafts<ScoutMessage> = {};
+// Answers save as they stream, so saving that keeps failing is shown once, not every second.
+const failingKeys = new Set<string>();
+function store(key: string, value?: unknown) {
+  try {
+    if (value === undefined) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
+    failingKeys.delete(key);
+    return true;
+  } catch {
+    if (!failingKeys.size) toast.error("Your browser could not save this conversation.");
+    failingKeys.add(key);
+    return false;
+  }
+}
 // Show every source as a card, up to the most any research engine returns.
 const MAX_SOURCE_CARDS = 8;
 type Suggestion = (typeof SUGGESTIONS)[number] | typeof PHOTO_SAMPLE;
@@ -259,7 +277,6 @@ function AccessGate({ onUnlock }: { onUnlock: (code: string) => Promise<boolean>
 function Mark({ size = 33 }: { size?: number }) {
   return <Globe2 size={size} strokeWidth={1.4} className="brand-mark" />;
 }
-const lastQuestionId = (messages: ScoutMessage[]) => messages.findLast((m) => m.role === "user")?.id;
 function domain(url: string) {
   try {
     return new URL(url).hostname.replace(/^www\./, "");
@@ -281,20 +298,25 @@ export default function Home() {
   useEffect(() => {
     try {
       const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
-      if (Array.isArray(raw))
+      if (Array.isArray(raw)) {
+        drafts = readDrafts(localStorage.getItem(DRAFTS_KEY));
         // Device-local history loads after hydration: reading localStorage while
         // rendering would make the first client render differ from the server HTML.
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setThreads(
-          raw
-            .filter(
-              (t) =>
-                typeof t.id === "string" &&
-                typeof t.title === "string" &&
-                Array.isArray(t.messages),
-            )
-            .slice(0, 30),
+          applyDrafts(
+            raw
+              .filter(
+                (t) =>
+                  typeof t.id === "string" &&
+                  typeof t.title === "string" &&
+                  Array.isArray(t.messages),
+              )
+              .slice(0, 30),
+            drafts,
+          ),
         );
+      }
     } catch {
       /* local storage can be disabled */
     }
@@ -312,14 +334,12 @@ export default function Home() {
     saveSidebarOpen(open);
   }, []);
   useEffect(() => {
-    if (loaded) {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(threads));
-      } catch {
-        // Answers save as they stream, so show this once rather than every second.
-        toast.error("Your browser could not save this conversation.", { id: "save-failed" });
-      }
-    }
+    if (!loaded || !store(STORAGE_KEY, threads)) return;
+    // Drafts the history now holds are done with.
+    const pending = pendingDrafts(threads, drafts);
+    if (Object.keys(pending).length === Object.keys(drafts).length) return;
+    drafts = pending;
+    store(DRAFTS_KEY, Object.keys(pending).length ? pending : undefined);
   }, [threads, loaded]);
   const newChat = useCallback((prompt = "") => {
     setInitialPrompt(prompt);
@@ -331,7 +351,7 @@ export default function Home() {
     setActiveId(id);
     setHistoryOpen(false);
   };
-  const saveThread = useCallback((id: string, messages: ScoutMessage[]) => {
+  const saveThread = useCallback((id: string, messages: ScoutMessage[], { started, running }: SaveInfo) => {
     if (!messages.length) return;
     const title = messageText(
       messages.find((m) => m.role === "user") || messages[0],
@@ -340,12 +360,17 @@ export default function Home() {
       ...m,
       parts: m.parts.map((p) => (p.type === "file" ? { ...p, url: historyPhotoUrl(p.url) } : p)),
     }));
+    const updatedAt = Date.now();
+    // An answer still being written saves as a draft; the history is written when it starts and ends.
+    if (running && !started) {
+      drafts = { ...drafts, [id]: { updatedAt, messages: stored } };
+      store(DRAFTS_KEY, drafts);
+      return;
+    }
     setThreads((prev) => {
-      const thread = { id, title, messages: stored, updatedAt: Date.now() };
-      const saved = prev.find((t) => t.id === id);
-      // A new question moves its conversation to the top; more of an answer keeps it in place.
-      if (saved && lastQuestionId(saved.messages) === lastQuestionId(stored))
-        return prev.map((t) => (t.id === id ? thread : t));
+      const thread = { id, title, messages: stored, updatedAt };
+      // Starting an answer moves its conversation to the top; more of an answer keeps it in place.
+      if (!started && prev.some((t) => t.id === id)) return prev.map((t) => (t.id === id ? thread : t));
       return [thread, ...prev.filter((t) => t.id !== id)].slice(0, 30);
     });
   }, []);
@@ -402,6 +427,7 @@ export default function Home() {
     return false;
   }, []);
   const forgetAccess = async () => {
+    chats.stopAll();
     rememberAccessCode("");
     setSettingsOpen(false);
     const data = await fetchConfig("");
@@ -683,7 +709,7 @@ function AppSidebar({
           {threads.length === 0 ? (
             <p className="sidebar-note">A fresh space for your next idea.</p>
           ) : (
-            threads.slice(0, 8).map((t) => (
+            threads.filter((t, i) => i < 8 || running.includes(t.id)).map((t) => (
               <button
                 className={`history-item ${t.id === activeId ? "selected" : ""}`}
                 key={t.id}
@@ -734,19 +760,21 @@ function AppSidebar({
         <SideIconButton label="Explore a research example" className="rail-button" onClick={onDemo}>
           <BookOpen size={19} />
         </SideIconButton>
-        {threads
-          .filter((t) => running.includes(t.id))
-          .map((t) => (
-            <SideIconButton
-              key={t.id}
-              label={`Still answering: ${t.title}`}
-              className="rail-button rail-running"
-              aria-current={t.id === activeId ? "page" : undefined}
-              onClick={() => onSelect(t.id)}
-            >
-              <LoaderCircle size={18} className="spin" />
-            </SideIconButton>
-          ))}
+        <div className="rail-running-list">
+          {threads
+            .filter((t) => running.includes(t.id))
+            .map((t) => (
+              <SideIconButton
+                key={t.id}
+                label={`Still answering: ${t.title}`}
+                className="rail-button rail-running"
+                aria-current={t.id === activeId ? "page" : undefined}
+                onClick={() => onSelect(t.id)}
+              >
+                <LoaderCircle size={18} className="spin" />
+              </SideIconButton>
+            ))}
+        </div>
         <SideIconButton label="Workspace settings" className="rail-button rail-settings" onClick={onSettings}>
           <span className="avatar">S</span>
         </SideIconButton>

@@ -13,6 +13,9 @@ export type RegistryChat<M> = {
   "~registerStatusCallback": (onChange: () => void) => () => void;
 };
 
+/** Saving a Conversation: `started` the moment its Answer starts, `running` until it ends. */
+export type SaveInfo = { started: boolean; running: boolean };
+
 export type Clock = {
   now: () => number;
   setTimeout: (run: () => void, ms: number) => unknown;
@@ -26,6 +29,8 @@ export type ChatRegistry<C> = {
   show: (id: string) => void;
   /** Stops the Conversation's Chat and forgets it without saving, for a deleted Conversation. */
   remove: (id: string) => void;
+  /** Stops every running Answer; each is saved as it stands. */
+  stopAll: () => void;
   /** Saves every running or unsaved Chat now, for a page that is going away. */
   flush: () => void;
   has: (id: string) => boolean;
@@ -60,7 +65,7 @@ export function createChatRegistry<M, C extends RegistryChat<M> = RegistryChat<M
   saveEveryMs = SAVE_EVERY_MS,
   clock = systemClock,
 }: {
-  save: (id: string, messages: M[]) => void;
+  save: (id: string, messages: M[], info: SaveInfo) => void;
   saveEveryMs?: number;
   clock?: Clock;
 }): ChatRegistry<C> {
@@ -79,10 +84,10 @@ export function createChatRegistry<M, C extends RegistryChat<M> = RegistryChat<M
     if (entry.timer !== undefined) clock.clearTimeout(entry.timer);
     entry.timer = undefined;
   };
-  const saveNow = (id: string, entry: Entry<C>) => {
+  const saveNow = (id: string, entry: Entry<C>, started = false) => {
     cancelSave(entry);
     entry.lastSave = clock.now();
-    save(id, entry.chat.messages);
+    save(id, entry.chat.messages, { started, running: entry.running });
   };
   const forget = (id: string, entry: Entry<C>) => {
     entry.unsubscribe();
@@ -99,6 +104,7 @@ export function createChatRegistry<M, C extends RegistryChat<M> = RegistryChat<M
   const statusChanged = (id: string, entry: Entry<C>) => {
     const wasRunning = entry.running;
     entry.running = isRunning(entry.chat.status);
+    if (!wasRunning && entry.running) saveNow(id, entry, true);
     if (wasRunning && !entry.running) {
       saveNow(id, entry);
       if (id !== onScreen) {
@@ -144,6 +150,9 @@ export function createChatRegistry<M, C extends RegistryChat<M> = RegistryChat<M
       forget(id, entry);
       void entry.chat.stop();
       updateRunning();
+    },
+    stopAll() {
+      for (const entry of entries.values()) if (entry.running) void entry.chat.stop();
     },
     flush() {
       for (const [id, entry] of entries)

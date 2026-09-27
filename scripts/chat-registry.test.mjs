@@ -73,7 +73,10 @@ function fakeClock() {
 function setup() {
   const clock = fakeClock();
   const saves = [];
-  const chats = createChatRegistry({ save: (id, messages) => saves.push({ id, messages, at: clock.now() }), clock });
+  const chats = createChatRegistry({
+    save: (id, messages, { started, running }) => saves.push({ id, messages, started, running, at: clock.now() }),
+    clock,
+  });
   const created = {};
   const open = (id, messages) => {
     const chat = chats.get(id, () => (created[id] = fakeChat(messages)));
@@ -105,42 +108,66 @@ test("a new question is saved at once, and a streaming answer at most once a sec
   const { clock, saves, open } = setup();
   const chat = open("a");
   ask(chat);
-  assert.deepEqual(saves.map((s) => [s.at, s.messages.length]), [[0, 1]]);
+  assert.deepEqual([saves.at(-1).at, saves.at(-1).messages.length], [0, 1]);
+  saves.length = 0;
   chat.setStatus("streaming");
   for (let t = 0; t < 9; t++) {
     clock.advance(100);
     chat.write(`${t}`);
   }
-  assert.equal(saves.length, 1, "no save inside the first second");
+  assert.equal(saves.length, 0, "no save inside the first second");
   clock.advance(100);
-  assert.equal(saves.length, 2);
-  assert.equal(saves[1].at, SAVE_EVERY_MS);
-  assert.equal(saves[1].messages.at(-1).text, "012345678", "the latest words, not the first chunk");
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].at, SAVE_EVERY_MS);
+  assert.equal(saves[0].messages.at(-1).text, "012345678", "the latest words, not the first chunk");
   clock.advance(300);
   chat.write("9");
   clock.advance(699);
-  assert.equal(saves.length, 2);
+  assert.equal(saves.length, 1);
   clock.advance(1);
-  assert.deepEqual([saves[2].at, saves[2].messages.at(-1).text], [2 * SAVE_EVERY_MS, "0123456789"]);
+  assert.deepEqual([saves[1].at, saves[1].messages.at(-1).text], [2 * SAVE_EVERY_MS, "0123456789"]);
   clock.advance(5000);
-  assert.equal(saves.length, 3, "nothing new, nothing saved");
+  assert.equal(saves.length, 2, "nothing new, nothing saved");
+});
+
+test("starting an answer saves its conversation at once as started; saving more of it does not", () => {
+  const { clock, saves, open } = setup();
+  const chat = open("a", [{ role: "user", text: "Old?" }, { role: "assistant", text: "Old." }]);
+  ask(chat, "New?");
+  assert.deepEqual([saves.at(-1).started, saves.at(-1).messages.at(-1).text], [true, "New?"]);
+  assert.equal(saves.filter((s) => s.started).length, 1);
+  chat.setStatus("streaming");
+  chat.write("Part");
+  clock.advance(SAVE_EVERY_MS);
+  chat.write(" two");
+  clock.advance(SAVE_EVERY_MS);
+  chat.setStatus("error");
+  assert.ok(saves.length > 2);
+  assert.equal(saves.filter((s) => s.started).length, 1, "only the start is marked");
+
+  // Try again after a failure starts a new answer to the same question.
+  clock.advance(100);
+  chat.setStatus("submitted");
+  assert.deepEqual([saves.at(-1).started, saves.at(-1).at], [true, clock.now()], "saved at once, not held by the throttle");
+  assert.equal(clock.pending(), 0);
 });
 
 test("the final state is saved the moment an answer finishes, with no stale save after it", () => {
   const { clock, saves, open } = setup();
   const chat = open("a");
   ask(chat);
+  saves.length = 0;
   chat.setStatus("streaming");
   clock.advance(200);
   chat.write("Almost");
   clock.advance(100);
   chat.write(" done.");
   chat.setStatus("ready");
-  assert.equal(saves.length, 2);
-  assert.deepEqual([saves[1].at, saves[1].messages.at(-1).text], [300, "Almost done."]);
+  assert.equal(saves.length, 1);
+  assert.deepEqual([saves[0].at, saves[0].messages.at(-1).text], [300, "Almost done."]);
   assert.equal(clock.pending(), 0, "the throttled save was dropped");
   clock.advance(5000);
-  assert.equal(saves.length, 2);
+  assert.equal(saves.length, 1);
 });
 
 test("an answer that fails is saved as it stands", () => {
@@ -282,4 +309,42 @@ test("flush saves every running or unsaved Chat now, for a page that is going aw
   assert.equal(clock.pending(), 0);
   clock.advance(5000);
   assert.equal(saves.length, before + 2);
+});
+
+test("each save says whether the answer is still running", () => {
+  const { clock, saves, chats, open } = setup();
+  const chat = open("a");
+  const last = () => [saves.at(-1).started, saves.at(-1).running];
+  ask(chat);
+  assert.deepEqual(last(), [true, true]);
+  chat.setStatus("streaming");
+  clock.advance(SAVE_EVERY_MS);
+  chat.write("Part");
+  assert.deepEqual(last(), [false, true]);
+  chat.write(" two");
+  chats.flush();
+  assert.deepEqual(last(), [false, true], "a page going away saves a running answer as running");
+  chat.setStatus("ready");
+  assert.deepEqual(last(), [false, false]);
+  assert.equal(saves.at(-1).messages.at(-1).text, "Part two");
+});
+
+test("stopAll stops every running answer, and each is saved as it stands", () => {
+  const { chats, saves, open } = setup();
+  const a = open("a");
+  ask(a);
+  a.setStatus("streaming");
+  a.write("Half an answer");
+  const b = open("b");
+  ask(b);
+  const c = open("c");
+  ask(c);
+  c.setStatus("ready");
+  chats.stopAll();
+  assert.deepEqual([a.stops, b.stops, c.stops], [1, 1, 0], "a finished answer is left alone");
+  a.setStatus("ready"); // the stopped requests end
+  b.setStatus("ready");
+  assert.equal(saves.findLast((s) => s.id === "a").messages.at(-1).text, "Half an answer");
+  assert.ok(saves.some((s) => s.id === "b"));
+  assert.deepEqual(chats.running(), []);
 });

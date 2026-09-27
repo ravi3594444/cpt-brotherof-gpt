@@ -52,7 +52,7 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 - **Research phase**: searching → reading → writing → complete. It shows "Research stopped" if the request ends before complete, or if Research fails; the Answer model then says it failed.
 - **Browser Use Cloud run**: queued → dispatching → running → completed, failed, or cancelled.
 - **Sample mode**: on until a Research engine is connected; the Sample switch overrides it for the current Conversation.
-- **Answer run**: an Answer runs until it finishes, fails, or Stop ends it. Opening another Conversation or a new one leaves it running, with a spinner on its Conversation in the sidebar and the folded rail; several can run at once. Deleting its Conversation stops it. What it has written is saved about once a second as it streams, so a reload keeps the words so far, though the reload ends the Answer.
+- **Answer run**: an Answer runs until it finishes, fails, or Stop ends it. Starting one, with a new Question or Try again, moves its Conversation to the top of the list. Opening another Conversation or a new one leaves it running, with a spinner on its Conversation in the sidebar and the folded rail; several can run at once. Deleting its Conversation, or forgetting the Access code, stops it. What it has written is saved about once a second as it streams, so a reload keeps the words so far, though the reload ends the Answer.
 
 ## Ambiguities
 
