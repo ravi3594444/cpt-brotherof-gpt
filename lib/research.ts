@@ -116,3 +116,24 @@ export async function readPages(
     partial: urls.some((url) => !content.has(url)),
   };
 }
+const closers: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+// Trailing punctuation and unbalanced closing brackets belong to the sentence, not the link.
+function trimLinkEnd(raw: string): string {
+  let url = raw;
+  for (;;) {
+    const last = url.at(-1) || "";
+    if (/[.,;:!?'"*]/.test(last)) url = url.slice(0, -1);
+    else if (closers[last] && url.split(closers[last]).length <= url.split(last).length - 1)
+      url = url.slice(0, -1);
+    else return url;
+  }
+}
+/** Public HTTP(S) links written in free text, deduplicated, in order of appearance. */
+export function extractPublicUrls(text: string): string[] {
+  const urls = new Set<string>();
+  for (const raw of text.match(/https?:\/\/[^\s<>"'`]+/g) || []) {
+    const url = publicUrl(trimLinkEnd(raw));
+    if (url) urls.add(url);
+  }
+  return [...urls];
+}

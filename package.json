@@ -11,6 +11,8 @@
     "build": "node scripts/run-framework.mjs build",
     "start": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "test": "node --test scripts/*.test.mjs",
+    "test:browser": "node scripts/browser-smoke.mjs",
     "db:generate": "drizzle-kit generate",
     "android:sync": "cap sync android",
     "android:open": "cap open android"

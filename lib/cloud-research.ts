@@ -1,5 +1,5 @@
 import type { ResearchSource } from "./chat-types";
-import { publicUrl, ResearchError } from "./research.ts";
+import { extractPublicUrls, publicUrl, ResearchError } from "./research.ts";
 
 export type BrowserEngine = "browser_use" | "kernel";
 export type ResearchEngine = "auto" | BrowserEngine | "tavily";
@@ -63,31 +63,41 @@ function sourceFromUnknown(value: unknown): ResearchSource | undefined {
   };
 }
 
-export function parseAgentSources(output: unknown, result: string | null): ResearchSource[] {
-  let value = output;
-  if (!value && result) {
+// Browser Use v4 may ignore outputSchema and return text: pure JSON, a fenced
+// JSON block after prose, or prose followed by a bare object.
+function jsonIn(text: string): unknown {
+  const candidates = [text, ...[...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1])];
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end > start) candidates.push(text.slice(start, end + 1));
+  for (const candidate of candidates) {
     try {
-      value = JSON.parse(result.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, ""));
+      return JSON.parse(candidate.trim());
     } catch {
-      // The agent may have answered in prose; extract only explicit public links below.
+      // Try the next candidate; prose falls back to explicit public links below.
     }
   }
+}
+
+export function parseAgentSources(output: unknown, result: string | null): ResearchSource[] {
+  const value = output || (result ? jsonIn(result) : undefined);
   const entries = Array.isArray(value)
     ? value
     : value && typeof value === "object" && Array.isArray((value as { sources?: unknown }).sources)
       ? (value as { sources: unknown[] }).sources
       : [];
-  const sources = entries.map(sourceFromUnknown).filter((s): s is ResearchSource => !!s);
+  // An agent's summary is never page text Scout read itself, whatever the agent claims.
+  const sources: ResearchSource[] = entries
+    .map(sourceFromUnknown)
+    .filter((s): s is ResearchSource => !!s)
+    .map((s) => ({ ...s, read: false }));
   if (!sources.length && result) {
-    for (const raw of result.match(/https?:\/\/[^\s<>\]\[()"'{}]+/g) || []) {
-      const url = publicUrl(raw.replace(/[.,;!?]+$/, ""));
-      if (url)
-        sources.push({
-          title: new URL(url).hostname,
-          url,
-          content: result.slice(0, 2500),
-        });
-    }
+    for (const url of extractPublicUrls(result))
+      sources.push({
+        title: new URL(url).hostname,
+        url,
+        content: result.slice(0, 2500),
+      });
   }
   return [...new Map(sources.map((s) => [s.url, s])).values()].slice(0, 6);
 }
@@ -105,7 +115,7 @@ export async function browserUseResearch(
       method: "POST",
       headers,
       body: JSON.stringify({
-        task: `Research this question using the web browser: ${question.slice(0, 4000)}. Visit relevant original pages. Return a short synthesis and a JSON object with a "sources" array, each containing exact visited page "url", "title", and a concise "summary" of what that page actually says. For shopping pages include the product's actual image URL as "image" if present, never a generic photo. Do not invent or cite a page you did not visit. Do not log in, purchase, submit forms, or change any external account.`,
+        task: `Research this question using the web browser: ${question.slice(0, 4000)}. Visit relevant original pages. Reply with only a JSON object, no other text: a "summary" string and a "sources" array, each item containing the exact visited page "url", "title", and a concise "summary" of what that page actually says. For shopping pages include the product's actual image URL as "image" if present, never a generic photo. Do not invent or cite a page you did not visit. Do not log in, purchase, submit forms, or change any external account.`,
         maxCostUsd: 1,
         outputSchema: {
           type: "object",
@@ -191,7 +201,12 @@ export async function jevChooseEngine(
   key: string,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
+  progress?: Progress,
 ): Promise<BrowserEngine> {
+  const fallback = (why: string): BrowserEngine => {
+    progress?.(`JEV was ${why}; using Browser Use Cloud`);
+    return "browser_use";
+  };
   try {
     const response = await fetcher("https://api.typesafe.ai/v1/systemone", {
       method: "POST",
@@ -212,17 +227,22 @@ export async function jevChooseEngine(
       }),
       signal: AbortSignal.any([signal, AbortSignal.timeout(4500)]),
     });
-    if (!response.ok) return "browser_use";
+    if (!response.ok) return fallback("unavailable");
     const body = await response.json() as {
       answers?: { route?: { choice?: string; confidence?: number } };
     };
-    return body.answers?.route?.choice === "kernel" &&
-      (body.answers.route.confidence || 0) >= 0.65
-      ? "kernel"
-      : "browser_use";
+    const route = body.answers?.route;
+    if (route?.choice === "kernel") {
+      if ((route.confidence || 0) < 0.65) return fallback("unsure");
+      progress?.("JEV selected Kernel");
+      return "kernel";
+    }
+    if (route?.choice !== "browser_use") return fallback("unavailable");
+    progress?.("JEV selected Browser Use Cloud");
+    return "browser_use";
   } catch {
     signal.throwIfAborted();
-    return "browser_use";
+    return fallback("unavailable");
   }
 }
 
@@ -299,15 +319,14 @@ export async function kernelResearch(
     throw new ResearchError("Kernel did not create a valid browser session.");
   progress?.("Kernel opened a separate cloud browser");
   try {
-    const candidate = question.match(/https?:\/\/[^\s<>"\])]+/);
-    const directUrl = candidate && publicUrl(candidate[0]);
+    const directUrl = extractPublicUrls(question)[0];
     progress?.(directUrl ? "Kernel is opening the supplied page" : "Kernel is finding and reading public pages");
     const result = await jsonResponse<{
       success?: boolean; result?: unknown;
     }>(
       await fetcher(`${kernelBase}/${id}/playwright/execute`, {
         method: "POST", headers,
-        body: JSON.stringify({ code: kernelScript(question, directUrl || undefined), timeout_sec: 58 }),
+        body: JSON.stringify({ code: kernelScript(question, directUrl), timeout_sec: 58 }),
         signal: AbortSignal.any([signal, AbortSignal.timeout(65000)]),
       }),
       "Kernel",
@@ -328,4 +347,25 @@ export async function kernelResearch(
       method: "DELETE", headers, signal: AbortSignal.timeout(5000),
     }).catch(() => {});
   }
+}
+
+export async function chooseResearchEngine(
+  requested: ResearchEngine,
+  keys: { browserUseKey: string; kernelKey: string; jevKey: string },
+  question: string,
+  signal: AbortSignal,
+  fetcher: Fetcher = fetch,
+  progress?: Progress,
+): Promise<Exclude<ResearchEngine, "auto">> {
+  const label = { browser_use: "Browser Use Cloud", kernel: "Kernel", tavily: "Search API" };
+  if (requested !== "auto") {
+    progress?.(`Selected ${label[requested]}`);
+    return requested;
+  }
+  // JEV reports its own decision, or why Scout fell back, through progress.
+  if (keys.browserUseKey && keys.kernelKey && keys.jevKey)
+    return jevChooseEngine(question, keys.jevKey, signal, fetcher, progress);
+  const engine = keys.browserUseKey ? "browser_use" : keys.kernelKey ? "kernel" : "tavily";
+  progress?.(`Selected ${label[engine]}`);
+  return engine;
 }

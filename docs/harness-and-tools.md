@@ -39,10 +39,16 @@ browser, opening a session, visiting pages, and collecting sources.
 
 ## Public app API
 
+When the server has `SCOUT_ACCESS_CODE`, both endpoints need the code in the
+`x-scout-access` request header: `POST /api/chat` answers 401 without it, and
+`GET /api/config` returns `access: "required"` with nothing connected. Without
+the variable, `access` is `"open"`; with the right code it is `"granted"`.
+
 `GET /api/config` returns only booleans and a display name:
 
 ```ts
 type ScoutConfig = {
+  access: "open" | "granted" | "required";
   demo: boolean;
   modelConnected: boolean;
   searchConnected: boolean;
@@ -60,12 +66,29 @@ type ScoutConfig = {
 
 ```ts
 type ChatRequest = {
-  messages: Array<{ role: "user" | "assistant"; parts: Array<{ type: string; text?: string }> }>;
+  messages: Array<{
+    role: "user" | "assistant";
+    parts: Array<
+      | { type: "text"; text: string }
+      | { type: "file"; mediaType: "image/jpeg" | "image/png" | "image/webp"; url: string } // base64 data URL
+    >;
+  }>;
   webEnabled: boolean;
   preview?: boolean;
   engine?: "auto" | "browser_use" | "kernel" | "tavily";
 };
 ```
+
+Photos: a question can carry up to four photos. The browser shrinks each to
+at most 1280 px (JPEG) before sending and sends photos only for the latest
+question that has them, so follow-ups about a photo keep it without resending
+older ones. The server accepts only JPEG, PNG, or WebP base64 data URLs and
+answers 400 with a plain message otherwise. Photos go to the answer model as
+image parts; web research uses the typed words only. A photo with no typed
+words is sent as "What's in this photo?" without web search. Sample mode
+cannot read photos and says so. If the model fails on a request with photos,
+the error says the model may not read images. Saved history keeps a 200 px
+thumbnail of each photo.
 
 The response is a Vercel AI SDK UI message stream. Its application events are:
 

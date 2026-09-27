@@ -20,6 +20,8 @@ export type ScoutMessage = UIMessage<
   { research: ResearchData; suggestions: string[] }
 >;
 export type ScoutConfig = {
+  // "required" hides the workspace until the right access code is sent.
+  access: "open" | "granted" | "required";
   demo: boolean;
   modelConnected: boolean;
   searchConnected: boolean;
@@ -33,6 +35,13 @@ export type LocalThread = {
   messages: ScoutMessage[];
 };
 export const DEMO_QUESTION = "How do AI agents search the web?";
+// The sample that shows a source card with a picture.
+export const PHOTO_SAMPLE = {
+  text: "Show me a photo source card",
+  label: "See a source with a picture",
+  category: "Sample",
+  icon: "image",
+} as const;
 export const SUGGESTIONS = [
   {
     text: "How do AI agents search the web?",
@@ -52,7 +61,7 @@ export const SUGGESTIONS = [
     category: "Go a little deeper",
     icon: "book",
   },
-];
+] as const;
 export function messageText(message: ScoutMessage) {
   return message.parts
     .filter((p) => p.type === "text")

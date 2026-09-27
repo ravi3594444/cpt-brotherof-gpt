@@ -6,7 +6,9 @@ const config: CapacitorConfig = {
   appName: "Scout",
   webDir: "mobile-shell",
   server: {
-    url: "https://scout-web-research.belugaremodeling.chatgpt.site",
+    // The site the app opens. Build for your deployment with, for example:
+    // SCOUT_APP_URL=https://your-project.vercel.app pnpm exec cap sync android
+    url: process.env.SCOUT_APP_URL || "https://scout-web-research.belugaremodeling.chatgpt.site",
     cleartext: false,
   },
   android: {

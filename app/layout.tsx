@@ -17,6 +17,8 @@ export const viewport: Viewport = {
   initialScale: 1,
   themeColor: "#171819",
   viewportFit: "cover",
+  // Android: shrink the page when the keyboard opens so the question box stays visible.
+  interactiveWidget: "resizes-content",
 };
 export default function RootLayout({
   children,
