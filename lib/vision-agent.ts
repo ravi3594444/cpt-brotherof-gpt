@@ -1,7 +1,8 @@
 import type { ResearchSource } from "./chat-types";
-import { ENGINE_MIN_MS, jsonIn, jsonResponse, kernelBase, kernelBrowserBody, notEnoughTime, type ResearchTime } from "./cloud-research.ts";
+import { ENGINE_MIN_MS, jsonIn, jsonResponse, kernelBase, kernelBrowserBody, notEnoughTime, type FoundPage, type ResearchTime } from "./cloud-research.ts";
 import {
   extractPublicUrls,
+  findPages,
   isSearchPage,
   publicUrl,
   ResearchError,
@@ -229,6 +230,9 @@ Rules: never log in, sign up, buy, book, pay, accept terms, or submit any form o
   const lines = [
     `Question: ${agent.question.slice(0, short ? 600 : 2000)}`,
     `Search query: ${agent.query}`,
+    ...(agent.found?.length
+      ? ["Pages a web search found (open any of them):", ...agent.found.map((p, i) => `${i + 1}. ${p.title} — ${p.url}`)]
+      : []),
     `Research depth: ${agent.depth}. Pages to keep: ${KEEP[agent.depth]}.`,
     `Step ${agent.turns} of ${maxSteps}. Pages kept so far: ${kept.length ? kept.join("; ") : "none"}.`,
     history.length ? `Your previous actions: ${history.join(" → ")}` : "",
@@ -252,7 +256,8 @@ Rules: never log in, sign up, buy, book, pay, accept terms, or submit any form o
   ];
 }
 
-type Keys = { kernelKey: string; vision: VisionService };
+/** A Search API key (searchKey) has the Search API find the pages the agent starts from. */
+type Keys = { kernelKey: string; vision: VisionService; searchKey?: string };
 const kernelHeaders = (key: string) => ({ Authorization: `Bearer ${key}`, "Content-Type": "application/json" });
 // Pages the agent keeps, at most.
 const MAX_KEPT = 6;
@@ -295,6 +300,8 @@ export type VisionAgentState = {
   question: string;
   /** What it searches for first. */
   query: string;
+  /** Pages the Search API found for the query: the agent starts on the first one. */
+  found?: FoundPage[];
   depth: ResearchDepth;
   /** Turns taken; the first one also opens the start page. */
   turns: number;
@@ -307,9 +314,14 @@ export type VisionAgentState = {
   history: string[];
   kept: ResearchSource[];
 };
-export function newVisionAgent(browserId: string, input: ResearchInput): VisionAgentState {
+export function newVisionAgent(browserId: string, input: ResearchInput, found: FoundPage[] = []): VisionAgentState {
   const { task, query, depth } = researchTask(input);
-  return { browserId, question: task, query, depth, turns: 0, started: false, finished: false, history: [], kept: [] };
+  // Only what the prompt shows: titles and addresses, never the snippets.
+  const pages = found.slice(0, 6).map((p) => ({ url: p.url, title: p.title.slice(0, 160) }));
+  return {
+    browserId, question: task, query, depth, turns: 0, started: false, finished: false, history: [], kept: [],
+    ...(pages.length ? { found: pages } : {}),
+  };
 }
 
 /**
@@ -345,11 +357,16 @@ async function takeTurns(
     let page: PageObservation;
     if (!agent.started) {
       const direct = extractPublicUrls(agent.question)[0];
+      const first = agent.found?.[0];
       page = await step({
-        start: direct || `https://www.bing.com/search?q=${encodeURIComponent(agent.query.slice(0, 300))}`,
+        start: direct || first?.url || `https://www.bing.com/search?q=${encodeURIComponent(agent.query.slice(0, 300))}`,
       });
       agent.started = true;
-      progress?.(direct ? "Vision agent opened the supplied page" : `Vision agent searched the web for “${agent.query}”`);
+      progress?.(direct
+        ? "Vision agent opened the supplied page"
+        : first
+          ? `Vision agent opened “${first.title}”, the first of ${agent.found!.length} pages the Search API found`
+          : `Vision agent searched the web for “${agent.query}”`);
     } else page = await step({});
     seen = page;
     // The model's reply, or "" when it replied with no text.
@@ -461,8 +478,12 @@ export async function visionAgentResearch(
   if (end - startedAt < ENGINE_MIN_MS.vision_agent) throw notEnoughTime("vision_agent");
   // Requests end then too, so a slow page or model cannot hold research past it.
   const budget = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, end - startedAt))]);
+  // The Search API finds pages while Kernel opens the browser; it never throws.
+  const finding = extractPublicUrls(researchTask(input).task).length
+    ? Promise.resolve([])
+    : findPages(researchTask(input).query, keys.searchKey || "", signal, fetcher, progress);
   const id = await openVisionBrowser(keys.kernelKey, signal, fetcher, progress);
-  const agent = newVisionAgent(id, input);
+  const agent = newVisionAgent(id, input, await finding);
   try {
     const page = await takeTurns(agent, keys, signal, budget, fetcher, progress,
       { maxSteps: maxSteps ?? REQUEST_VISION_STEPS[agent.depth], until: end, turnMs: 0, clock });

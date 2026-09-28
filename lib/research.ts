@@ -62,15 +62,16 @@ async function requestTavily(
   key: string,
   body: unknown,
   signal: AbortSignal,
+  { fetcher = fetch, timeoutMs = 25000 }: { fetcher?: typeof fetch; timeoutMs?: number } = {},
 ) {
-  const response = await fetch(`https://api.tavily.com/${path}`, {
+  const response = await fetcher(`https://api.tavily.com/${path}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(25000)]),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
   });
   if (!response.ok)
     throw new ResearchError(
@@ -95,18 +96,20 @@ export async function searchWeb(
   query: string,
   key: string,
   signal: AbortSignal,
+  { depth = "advanced", ...request }: { depth?: "basic" | "advanced"; fetcher?: typeof fetch; timeoutMs?: number } = {},
 ): Promise<ResearchSource[]> {
   const result = await requestTavily(
     "search",
     key,
     {
       query: query.slice(0, 400),
-      search_depth: "advanced",
+      search_depth: depth,
       max_results: 5,
       include_answer: false,
       include_raw_content: false,
     },
     signal,
+    request,
   );
   return (result.results || [])
     .filter((s) => publicUrl(s.url))
@@ -115,6 +118,30 @@ export async function searchWeb(
       url: publicUrl(s.url)!,
       content: (s.content || "").slice(0, 3500),
     }));
+}
+/**
+ * The pages a Search API search finds for a browser to read, with their snippets. Search engines
+ * block cloud browsers or send them unrelated results, so a search API finds the pages when one is
+ * connected. None when the search fails: the browser then searches by itself.
+ */
+export async function findPages(
+  query: string,
+  key: string,
+  signal: AbortSignal,
+  fetcher: typeof fetch = fetch,
+  progress?: (step: string) => void,
+): Promise<ResearchSource[]> {
+  if (!key) return [];
+  try {
+    // A basic search is the fastest (well under a second) and costs one credit.
+    const found = await searchWeb(query, key, signal, { depth: "basic", fetcher, timeoutMs: 8000 });
+    if (!found.length) progress?.("Search API found no pages; the browser searches instead");
+    return found;
+  } catch (error) {
+    if (!signal.aborted)
+      progress?.(`Search API failed (${error instanceof Error ? error.message : "no answer"}); the browser searches instead`);
+    return [];
+  }
 }
 export async function readPages(
   sources: ResearchSource[],

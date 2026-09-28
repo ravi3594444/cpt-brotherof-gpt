@@ -35,7 +35,7 @@ Put these values in the host's secret environment, not in the app bundle:
 | `KERNEL_API_KEY` | Kernel cloud browser sessions and Playwright execution |
 | `AIMLAPI_API_KEY` | Optional JEV routing between the two browser services, through AI/ML API (`typesafe/jev`) |
 | `TYPESAFE_API_KEY` | The same JEV routing straight from TypeSafe (used only when `AIMLAPI_API_KEY` is not set) |
-| `TAVILY_API_KEY` | Optional legacy search/extraction fallback |
+| `TAVILY_API_KEY` | Recommended. Tavily Search API (free monthly credits): finds the pages Kernel and the Vision agent read, since search engines block cloud browsers or send them unrelated results. Without a browser key it is the research engine |
 | `VISION_MODEL_ID` | Optional model that can see, e.g. `deepseek/deepseek-v4.1-flash` on AI/ML API. It describes photos for a text-only answer model (such as Atria Dawn Preview), drives the Vision agent's browser, and writes the answer after research |
 | `VISION_MODEL_BASE_URL` | OpenAI-compatible address of the vision model; defaults to `https://api.aimlapi.com/v1` |
 | `VISION_MODEL_API_KEY` | Key for the vision model; defaults to `AIMLAPI_API_KEY` |

@@ -91,8 +91,8 @@ export function webResearch({ keys, engine, model, conversation, keepAlive, fetc
       const finding = chosen === "browser_use"
         ? await browserUseResearch(task, keys.browserUseKey, signal, services, progress.step, time)
         : chosen === "vision_agent" && keys.vision
-          ? await visionAgentResearch(task, { kernelKey: keys.kernelKey, vision: keys.vision }, signal, services, progress.step, time)
-          : await kernelResearch(task, keys.kernelKey, signal, services, progress.step, time);
+          ? await visionAgentResearch(task, { kernelKey: keys.kernelKey, vision: keys.vision, searchKey: keys.searchKey }, signal, services, progress.step, time)
+          : await kernelResearch(task, keys.kernelKey, signal, services, progress.step, time, keys.searchKey);
       return { ...finding, engine: chosen };
     } catch (error) {
       if (request.aborted || !signal.aborted) throw error;

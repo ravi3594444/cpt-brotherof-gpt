@@ -97,17 +97,35 @@ Keys are server-side environment variables.
    (Browser Use Cloud 60 seconds, the vision agent 45, Kernel 20), which
    matters for a late retry; each engine also refuses to open a paid browser
    with less than its minimum, including when chosen explicitly.
-   The older Tavily adapter remains available as a compatibility fallback.
+   With no browser key, the Search API is the engine; with one, it finds the
+   pages Kernel and the Vision agent read (see below).
 5. Browser Use Cloud runs its own browser agent; its task is the research
    task with one line for the depth ("Finish after a few relevant pages." or
    "Be thorough: visit many relevant pages from different sources before you
    finish."). Kernel creates an entirely separate cloud browser and executes a
-   fixed Playwright snippet: it searches Google, then Bing, for the query (or
-   opens the first pasted link), and reads up to four result pages side by
-   side, each in its own tab with its own 20-second limit (`Promise.allSettled`),
-   so four pages take about as long as the slowest one. A page that fails or
-   leaves the public web while it is read is left out. The code never sends
-   model-generated JavaScript to Kernel.
+   fixed Playwright snippet. Search engines treat cloud browsers as bots:
+   Google and DuckDuckGo block them, and Bing answers with results for one
+   word of the query ("best budget phone" gives Best Buy and dictionary
+   pages). So with `TAVILY_API_KEY`, a basic Tavily search (one credit, well
+   under a second) finds the pages while Kernel opens its browser, and Kernel
+   reads them. Without it, or when the search fails (the steps say why), the
+   snippet searches Bing for the query, reads each result's real address
+   from its `bing.com/ck/a` redirect link, and keeps only results that share
+   two of the query's words (all of them for a shorter query, a plural
+   matching its singular); when every result is unrelated, Kernel fails with
+   that reason, so a second research tries another engine. A pasted link is
+   opened directly. Kernel reads up to four pages side by side, each in its
+   own tab with its own 20-second limit (`Promise.allSettled`); once two are
+   read, the others get three seconds more, so a slow page does not hold the
+   answer. It reads a page as soon as its document is parsed (ads keep
+   `load` from coming for many seconds), and waits up to four seconds for
+   `load` only when the page is still nearly empty. It takes an `article`,
+   `main` or `[role=main]` text of at least 500 characters, else the whole
+   page's text. A page that fails, leaves the public web while it is read,
+   has under 200 characters, or reads as a bot check or block page ("Just a
+   moment", "Access Denied", "You've been blocked") is left out; a found
+   page left out still counts with the search's snippet, not Read. The code
+   never sends model-generated JavaScript to Kernel.
 6. The server validates public source URLs, keeps up to six Browser Use
    sources or four Kernel pages, and returns the observed evidence to the
    answer model, numbered in order, as the tool result (in the plain-text
@@ -289,8 +307,9 @@ type ChatRequest = {
 ```
 
 Vision agent: with `KERNEL_API_KEY` and a vision model (`VISION_MODEL_ID`), the
-`vision_agent` engine opens a Kernel browser on a Bing search for the query (or
-the first pasted link) and runs up to 8 steps (16 for deep research) within 200
+`vision_agent` engine opens a Kernel browser on the first page a Tavily search
+found for the query, and lists the others in its prompt, when `TAVILY_API_KEY`
+is set; otherwise on a Bing search for the query (or the first pasted link), and runs up to 8 steps (16 for deep research) within 200
 seconds, or until the research deadline if that is sooner; in a Research job,
 10 steps (40 for deep). Each step Scout sends the vision model the page's address, a numbered
 list of its visible clickable elements and text fields, the start of its text,
@@ -363,11 +382,11 @@ fake product pictures.
 | Tool | Request | Response used by Scout | Key |
 | --- | --- | --- | --- |
 | Browser Use Cloud V4 | `POST https://api.browser-use.com/api/v4/runs` with `task`, `maxCostUsd: 1`, and an output schema for `sources[{url,title,summary,image?}]`; poll `GET /api/v4/runs/{id}/status`, then `GET /api/v4/runs/{id}` once; when it ends without a result, `GET /api/v4/runs/{id}/events?after=` (cursor `nextAfter`, while `hasMore`); cancel `POST /api/v4/runs/{id}/cancel`; stop the browser with `PATCH /api/v4/browsers/{id}` `{"action":"stop"}` (id from `browser.ready`'s `data.browser_session_id`, or `GET /api/v4/browsers?agentSessionId=`) | completed run's structured `output.sources` or parseable `result`; otherwise the pages its events reached | `BROWSER_USE_API_KEY` in `X-Browser-Use-API-Key` |
-| Kernel browser | `POST https://api.onkernel.com/browsers`; `POST /browsers/{id}/playwright/execute` with fixed `code` and `timeout_sec`; `DELETE /browsers/{id}` | Playwright's returned list `[{url,title,content,read,image?}]` | `KERNEL_API_KEY` as Bearer |
+| Kernel browser | `POST https://api.onkernel.com/browsers`; `POST /browsers/{id}/playwright/execute` with fixed `code` and `timeout_sec`; `DELETE /browsers/{id}` | Playwright's returned `{ pages: [{url,title,content,read,image?}], unrelated }` (a plain list of pages is still read) | `KERNEL_API_KEY` as Bearer |
 | JEV | `POST https://api.aimlapi.com/v1/decisions` with `model: "typesafe/jev"` (AI/ML API), or `POST https://api.typesafe.ai/v1/systemone` with `model: "jev-latest"` (TypeSafe); both take `state` and a `choice` question between the connected engines (`vision_agent`, `kernel`, `browser_use`) | `answers.route.choice` and `confidence`; Browser Use Cloud needs at least 0.65 on a first try, and an unsure Kernel becomes the Vision agent for deep research | `AIMLAPI_API_KEY` or `TYPESAFE_API_KEY` as Bearer |
 | Answer model | OpenAI-compatible Chat Completions via Vercel AI SDK `streamText`, with OpenAI-style tool calling for `web_research` (plain-text RESEARCH/ANSWER fallback otherwise) | the research decision, direct answers, and answer tokens grounded in validated source list when there is no research writer | `MODEL_BASE_URL`, `MODEL_ID`, `MODEL_API_KEY` |
 | Research writer | The vision model's OpenAI-compatible Chat Completions via `@ai-sdk/openai-compatible` `streamText`, 6,000 output tokens | answer tokens (and reasoning) grounded in validated source list, after research | `VISION_MODEL_ID`, `VISION_MODEL_BASE_URL`, `VISION_MODEL_API_KEY` or `AIMLAPI_API_KEY`; `RESEARCH_WRITER=answer` turns it off |
-| Legacy search API | Tavily `search` and `extract` | ranked links and snippets, optionally full page text | `TAVILY_API_KEY` |
+| Search API | Tavily `search` (`search_depth: "basic"` to find pages for Kernel and the Vision agent; `"advanced"` for the Search API engine) and `extract` | ranked links and snippets, optionally full page text | `TAVILY_API_KEY` |
 
 The Browser Use agent is a hosted browser **and** an agent. Kernel is its own
 hosted browser; it is not a Browser Use session. JEV is a remote fast choice

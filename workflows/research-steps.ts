@@ -20,7 +20,7 @@ import {
 import { answerErrorMessage } from "../lib/conversation.ts";
 import { stepWriter, watchRun, type Chunk } from "../lib/job-stream.ts";
 import { answerModel, jobTiming, researchServices, writerModel, type ResearchJobInput } from "../lib/research-job.ts";
-import { ResearchError, researchTask, type ResearchTask } from "../lib/research.ts";
+import { extractPublicUrls, findPages, ResearchError, researchTask, type ResearchTask } from "../lib/research.ts";
 import { serverConfig } from "../lib/server-config.ts";
 import {
   closeVisionBrowser,
@@ -158,7 +158,7 @@ export async function kernelStep(input: ResearchJobInput, state: AnswerState, ta
     const finding = await kernelResearch(task, keys.kernelKey, c.signal, fetcher, researchProgress(state, c.writer).step, {
       deadline: Date.now() + 200_000,
       browserTimeoutSeconds: 60,
-    });
+    }, keys.searchKey);
     return { state, result: { finding: { ...finding, engine: "kernel" } } };
   } catch (error) {
     return failed(state, error);
@@ -194,8 +194,11 @@ export async function openVision(
   const c = stepContext("none");
   try {
     const { keys, fetcher } = c.services;
-    const id = await openVisionBrowser(keys.kernelKey, c.signal, fetcher, researchProgress(state, c.writer).step, 120);
-    return { state, agent: newVisionAgent(id, task) };
+    const step = researchProgress(state, c.writer).step;
+    // The Search API finds pages while Kernel opens the browser; it never throws.
+    const finding = extractPublicUrls(task.task).length ? Promise.resolve([]) : findPages(task.query, keys.searchKey, c.signal, fetcher, step);
+    const id = await openVisionBrowser(keys.kernelKey, c.signal, fetcher, step, 120);
+    return { state, agent: newVisionAgent(id, task, await finding) };
   } catch (error) {
     return failed(state, error);
   } finally {

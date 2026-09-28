@@ -1,6 +1,7 @@
 import type { ResearchSource } from "./chat-types";
 import {
   extractPublicUrls,
+  findPages,
   isSearchPage,
   publicUrl,
   repeats,
@@ -668,17 +669,29 @@ export async function jevChooseEngine(
   return choice;
 }
 
+/** A page a search found for Kernel to read: its address, title, and the search's snippet. */
+export type FoundPage = { url: string; title: string; content?: string };
+
 /**
- * Kernel's fixed Playwright script: it searches for the task's query (or opens the pasted link) and
- * reads up to four pages side by side, each within `pageMs`.
+ * Kernel's fixed Playwright script: it reads the pages a Search API found, the pasted link, or else
+ * what Bing finds for the task's query, up to four side by side, each within `pageMs`; once two are
+ * read, the others get `graceMs` more. It returns the pages it read and, from a Bing search, whether
+ * every result was unrelated to the query.
  */
-export function kernelScript(input: ResearchInput, directUrl?: string, { pageMs = 20_000 }: { pageMs?: number } = {}): string {
+export function kernelScript(
+  input: ResearchInput,
+  directUrl?: string,
+  { pageMs = 20_000, graceMs = 3000, found = [] }: { pageMs?: number; graceMs?: number; found?: FoundPage[] } = {},
+): string {
   const { query } = researchTask(input);
+  const given = found.slice(0, 6).map((p) => ({ url: p.url, title: p.title.slice(0, 220), content: (p.content || "").slice(0, 1500) }));
   // Only fixed Playwright code runs in Kernel; the user's input is a quoted value.
   return `
 const query = ${JSON.stringify(query.slice(0, 400))};
 const direct = ${JSON.stringify(directUrl || "")};
+const found = ${JSON.stringify(given)};
 const pageMs = ${Math.round(pageMs)};
+const graceMs = ${Math.round(graceMs)};
 const allowed = (value) => {
   try {
     const u = new URL(value);
@@ -689,31 +702,56 @@ const allowed = (value) => {
       ![".local", ".internal", ".localhost", ".test"].some(x => h.endsWith(x));
   } catch { return false; }
 };
-let targets = direct ? [{ url: direct, title: direct }] : [];
-if (!direct) {
-  for (const searchUrl of [
-    "https://www.google.com/search?q=" + encodeURIComponent(query),
-    "https://www.bing.com/search?q=" + encodeURIComponent(query)
-  ]) {
-    try {
-      await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-      targets = await page.locator("a:has(h3), #b_results h2 a").evaluateAll(anchors =>
-        anchors.slice(0, 12).map(a => ({
-          url: a.href,
-          title: (a.innerText || a.textContent || "").trim()
-        }))
-      );
-      targets = targets.filter(item => allowed(item.url)).slice(0, 4);
-      if (targets.length) break;
-    } catch { /* Try the other public search page. */ }
-  }
+// A Bing result links to a redirect page (bing.com/ck/a?...&u=a1<base64 address>); the address it
+// leads to is read instead of the redirect.
+const resultAddress = (href) => {
+  try {
+    const u = new URL(href);
+    if (!/(^|\\.)bing\\.com$/.test(u.hostname) || !u.pathname.startsWith("/ck/")) return href;
+    const coded = (u.searchParams.get("u") || "").replace(/^a1/, "").replace(/-/g, "+").replace(/_/g, "/");
+    return atob(coded + "=".repeat((4 - coded.length % 4) % 4));
+  } catch { return ""; }
+};
+// Bing answers a browser it takes for a bot with results for one word of the query; a relevant
+// result shares at least two of the query's words (all of them, for a shorter query), a plural
+// matching its singular.
+const common = new Set("the and for with what how why who when where which are was were does did can from that this into about your you".split(" "));
+const terms = [...new Set(query.toLowerCase().split(/[^\\p{L}\\p{N}]+/u).filter(w => w.length > 2 && !common.has(w)))]
+  .map(w => w.length > 4 ? w.replace(/(es|s)$/, "") : w);
+const relevant = (item) => {
+  const text = (item.title + " " + item.url).toLowerCase();
+  return terms.filter(t => text.includes(t)).length >= Math.min(2, terms.length);
+};
+let targets = direct ? [{ url: direct, title: direct }] : found.filter(item => allowed(item.url));
+let unrelated = false;
+if (!targets.length) {
+  try {
+    await page.goto("https://www.bing.com/search?setlang=en&q=" + encodeURIComponent(query), { waitUntil: "domcontentloaded", timeout: 15000 });
+    const listed = (await page.locator("#b_results h2 a").evaluateAll(anchors =>
+      anchors.slice(0, 12).map(a => ({
+        url: a.href,
+        title: (a.innerText || a.textContent || "").trim()
+      }))
+    )).map(item => ({ ...item, url: resultAddress(item.url) })).filter(item => allowed(item.url));
+    targets = listed.filter(relevant).slice(0, 4);
+    unrelated = listed.length > 0 && !targets.length;
+  } catch { /* No results: nothing to read. */ }
 }
-// Each page in a tab of its own, all at once; a page that is not read within pageMs is left out.
+// Each page in a tab of its own, all at once; a page that is not read within pageMs is left out, and
+// so is one still loading graceMs after two others were read: slow pages do not hold the answer.
+let pagesRead = 0;
+let graceTimer;
+let enough;
+const plenty = new Promise((_, reject) => { enough = () => { graceTimer = setTimeout(() => reject(new Error("Enough pages were read.")), graceMs); }; });
+plenty.catch(() => {});
 const withinTime = (work) => {
   let timer;
   const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("The page took too long.")), pageMs); });
-  return Promise.race([work, late]).finally(() => clearTimeout(timer));
+  return Promise.race([work, late, plenty]).finally(() => clearTimeout(timer));
 };
+// A bot check or a block page is not a source; such pages are short, so a long article about
+// captchas still counts.
+const blocked = /just a moment|attention required|access denied|been blocked|are you a robot|verify you are human|captcha|forbidden|security check|enable javascript/i;
 const readPage = async (target) => {
   if (!allowed(target.url)) return null;
   const tab = await context.newPage();
@@ -721,22 +759,42 @@ const readPage = async (target) => {
     return await withinTime((async () => {
       await tab.goto(target.url, { waitUntil: "domcontentloaded", timeout: 12000 });
       if (!allowed(tab.url())) return null;
-      const text = await tab.locator("main, article, body").first().innerText({ timeout: 5000 });
+      // The article's text when the page marks one out, else the whole page's.
+      const pageText = () => tab.evaluate(() => {
+        const parts = ["article", "main", "[role=main]"].map(s => document.querySelector(s)).filter(Boolean);
+        const marked = parts.map(el => el.innerText || "").find(t => t.trim().length >= 500);
+        return marked || (document.body && document.body.innerText) || "";
+      });
+      // Most pages have their text once the document is parsed (ads keep "load" from coming for
+      // many seconds); one that fills its text in with scripts gets a moment for that.
+      let text = await pageText();
+      if (text.trim().length < 500) {
+        await tab.waitForLoadState("load", { timeout: 4000 }).catch(() => {});
+        if (!allowed(tab.url())) return null;
+        text = await pageText();
+      }
+      const title = (await tab.title()) || "";
+      const trimmed = text.trim();
+      if (trimmed.length < 200 || (trimmed.length < 1500 && blocked.test(title + " " + trimmed))) return null;
       const metaImage = await tab.locator('meta[property="og:image"]').first()
         .getAttribute("content", { timeout: 1500 }).catch(() => null);
       // A page can move on (or fail) while it is read; its address is checked again.
       const url = tab.url();
       if (!allowed(url)) return null;
       const image = metaImage ? new URL(metaImage, url).href : undefined;
-      return { url, title: (await tab.title()).slice(0, 220) || target.title,
-        content: text.slice(0, 6000), image, read: true };
+      if (++pagesRead === 2) enough();
+      return { url, title: title.slice(0, 220) || target.title,
+        content: trimmed.slice(0, 6000), image, read: true };
     })());
   } catch { return null; /* Skip an inaccessible page. */ }
   finally { await tab.close().catch(() => {}); }
 };
 const read = await Promise.allSettled(targets.slice(0, 4).map(readPage));
-const out = read.flatMap((r) => (r.status === "fulfilled" && r.value ? [r.value] : []));
-return out;
+clearTimeout(graceTimer);
+// A found page that could not be read still counts with the search's snippet.
+const pages = read.flatMap((r, i) => r.status === "fulfilled" && r.value ? [r.value]
+  : targets[i].content ? [{ url: targets[i].url, title: targets[i].title, content: targets[i].content, read: false }] : []);
+return { pages, unrelated };
 `;
 }
 
@@ -747,12 +805,17 @@ export async function kernelResearch(
   fetcher: Fetcher = fetch,
   progress?: Progress,
   time: ResearchTime = {},
+  /** A Search API key: the Search API then finds the pages Kernel reads. */
+  searchKey = "",
 ): Promise<BrowserResult> {
   const request = researchTask(input);
   const clock = time.clock ?? Date.now;
   const left = () => (time.deadline ?? Infinity) - clock();
   // Kernel reads its pages in one go; without time for that, do not open (and pay for) a browser.
   if (left() < ENGINE_MIN_MS.kernel) throw notEnoughTime("kernel");
+  const directUrl = extractPublicUrls(request.task)[0];
+  // The Search API finds the pages while Kernel opens its browser; it never throws.
+  const finding = directUrl ? Promise.resolve([]) : findPages(request.query, searchKey, signal, fetcher, progress);
   const headers = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
   const browser = await jsonResponse<{ session_id?: string }>(
     await fetcher(kernelBase, {
@@ -765,8 +828,13 @@ export async function kernelResearch(
     throw new ResearchError("Kernel did not create a valid browser session.");
   progress?.("Kernel opened a separate cloud browser");
   try {
-    const directUrl = extractPublicUrls(request.task)[0];
-    progress?.(directUrl ? "Kernel is opening the supplied page" : `Kernel is searching for “${request.query}” and reading public pages`);
+    // Kernel reads four pages at most.
+    const found = (await finding).slice(0, 4);
+    progress?.(directUrl
+      ? "Kernel is opening the supplied page"
+      : found.length
+        ? `Search API found ${found.length} ${found.length === 1 ? "page" : "pages"} for “${request.query}”; Kernel is reading ${found.length === 1 ? "it" : "them"}`
+        : `Kernel is searching for “${request.query}” and reading public pages`);
     // The script, and the request waiting for it, end before research must.
     const seconds = Math.min(58, Math.floor((left() - 7000) / 1000));
     if (seconds < 5) throw notEnoughTime("kernel");
@@ -775,20 +843,27 @@ export async function kernelResearch(
     }>(
       await fetcher(`${kernelBase}/${id}/playwright/execute`, {
         method: "POST", headers,
-        body: JSON.stringify({ code: kernelScript(request, directUrl), timeout_sec: seconds }),
+        body: JSON.stringify({ code: kernelScript(request, directUrl, { found }), timeout_sec: seconds }),
         signal: AbortSignal.any([signal, AbortSignal.timeout(seconds * 1000 + 7000)]),
       }),
       "Kernel",
     );
     if (!result.success)
       throw new ResearchError("Kernel could not read these pages. Try Browser Use Cloud.");
-    const sources = (Array.isArray(result.result) ? result.result : [])
+    const out = (result.result && typeof result.result === "object" ? result.result : {}) as { pages?: unknown; unrelated?: unknown };
+    const pages = Array.isArray(result.result) ? result.result : Array.isArray(out.pages) ? out.pages : [];
+    const sources = pages
       .map(sourceFromUnknown)
       .filter((s): s is ResearchSource => !!s)
       .slice(0, 4);
     if (!sources.length)
-      throw new ResearchError("Kernel did not find readable pages. Try Browser Use Cloud.");
-    progress?.(`Kernel read ${sources.length} source pages`);
+      throw new ResearchError(out.unrelated === true
+        ? "Bing gave the cloud browser results unrelated to the question. A Search API key finds better pages."
+        : "Kernel did not find readable pages. Try Browser Use Cloud.");
+    const read = sources.filter((s) => s.read).length;
+    progress?.(read === sources.length
+      ? `Kernel read ${sources.length} source pages`
+      : `Kernel read ${read} of ${sources.length} pages; the others count with the search's snippet`);
     return { sources };
   } finally {
     // A session costs money while open; cleanup also happens when extraction fails.
