@@ -129,6 +129,41 @@ answer allows 16,000 output tokens (4,096 for a model that turns that away) and
 the Search API query plan 1,500, with leading think blocks stripped before its
 JSON is read.
 
+### Research jobs
+
+Where Vercel Workflows run (Vercel, or the local world under `next dev` and
+`next start`), research does not run inside the chat request. The answer model's
+first pass does; when it calls `web_research`, the route starts a Research job
+(`workflows/research-job.ts`) with serializable input only: the chat id, the
+task, the engine setting, the text-only conversation, the tool call, and the
+chunks already streamed, which the job writes again first so a replay from the
+start rebuilds the whole message. The route then pipes the job's stream into the
+same response and sends the job id as a `data-job` part.
+
+The job has no time limit. Browser Use is created once (no retries, so a retry
+never starts a second paid run) and then polled in windows of 240 seconds, one
+workflow step each, until it completes, fails, reaches `RESEARCH_MAX_COST_USD`,
+or passes 60 windows. The Vision agent runs in batches of up to 240 seconds, up
+to 60 steps, and its browser is closed in every case. Kernel and the Search API
+are one step each. The answer is its own step, with the tool defined and
+`toolChoice: "none"`. A retried step first writes `reset-step`, so its chunks do
+not show twice.
+
+A response carries the job's stream for at most 280 seconds; the client reads on
+from the next chunk (`GET /api/jobs/{runId}/stream?startIndex=`), so no single
+request meets Vercel's 300-second limit. The client resumes a job from index 0
+when the app comes back (visibilitychange, Capacitor's document `resume`,
+`online`) or its Conversation opens; the replay replaces the partial message.
+Stop calls `POST /api/jobs/{runId}/cancel`; steps check the job's status between
+polls and stop, and the stream ends with an `abort` chunk. After a cold start
+without a saved job id, `GET /api/chats/{chatId}/job` finds the running job
+through its hook (`scout-chat:<chatId>`); a new job for a Conversation stops the
+last one. All three routes check the access code. A finished job is kept one day
+on Hobby; after that the stream route answers 204 and the app says the answer is
+no longer available. Test mode (`SCOUT_TEST_MODE=1`, refused on Vercel) swaps in a
+fake answer model and a fake Browser Use Cloud so the browser checks can run the
+whole path with no keys.
+
 ## Public app API
 
 When the server has `SCOUT_ACCESS_CODE`, both endpoints need the code in the

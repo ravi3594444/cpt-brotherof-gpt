@@ -34,6 +34,8 @@ export type ChatRegistry<C> = {
   /** Saves every running or unsaved Chat now, for a page that is going away. */
   flush: () => void;
   has: (id: string) => boolean;
+  /** The Chats kept now, with their Conversations' ids. */
+  entries: () => Array<[string, C]>;
   /** Conversations whose Answer is still running: the same array until that changes. */
   running: () => readonly string[];
   subscribe: (listener: () => void) => () => void;
@@ -159,6 +161,7 @@ export function createChatRegistry<M, C extends RegistryChat<M> = RegistryChat<M
         if (entry.running || entry.timer !== undefined) saveNow(id, entry);
     },
     has: (id) => entries.has(id),
+    entries: () => [...entries].map(([id, entry]) => [id, entry.chat]),
     running: () => running,
     subscribe(listener) {
       listeners.add(listener);

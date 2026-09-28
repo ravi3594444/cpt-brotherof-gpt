@@ -13,3 +13,12 @@ export function accessAllowed(code: string, provided: string | null | undefined)
     difference |= code.charCodeAt(i) ^ (given.charCodeAt(i) || 0);
   return difference === 0;
 }
+
+/** The refusal for a request from another site, or without the access code; undefined when it may go on. */
+export function refuse(request: Request, code: string): Response | undefined {
+  const origin = request.headers.get("origin");
+  if (origin && origin !== new URL(request.url).origin)
+    return new Response("This request must come from your Scout workspace.", { status: 403 });
+  if (!accessAllowed(code, request.headers.get(ACCESS_HEADER)))
+    return new Response("Scout needs its access code. Reload Scout and enter it again.", { status: 401 });
+}

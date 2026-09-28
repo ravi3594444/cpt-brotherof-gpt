@@ -1416,6 +1416,117 @@ try {
       layout.headingVisible && layout.composerVisible && !layout.sideScroll, JSON.stringify(layout));
     await context.close();
   }
+  // Research jobs, against a server in test mode with durable research (a fake answer model and a
+  // fake Browser Use Cloud): SCOUT_TEST_MODE=1 WORKFLOW_TARGET_WORLD=local npx next start
+  const server = await (await fetch(new URL("/api/config", BASE))).json().catch(() => ({}));
+  if (!server.durable || !server.test) {
+    console.log("SKIP  research job checks: the server is not in test mode with durable research");
+  } else {
+    const counters = async () => (await (await fetch(new URL("/api/config", BASE))).json()).test;
+    // The page sees a connected workspace; its questions reach the test-mode server's fake model.
+    const openLive = async (viewport) => {
+      const context = await browser.newContext({ viewport });
+      await context.route("**/api/config", (route) => route.fulfill({
+        json: { ...LIVE_CONFIG, durable: true, engines: { ...LIVE_CONFIG.engines, browserUse: true } },
+      }));
+      const page = await context.newPage();
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.goto(BASE, { waitUntil: "networkidle" });
+      await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+      return { context, page, errors };
+    };
+    const ask = async (page, text) => {
+      await page.getByRole("textbox").fill(text);
+      await page.getByRole("textbox").press("Enter");
+    };
+    const answerText = (page) => page.locator(".assistant-message").allInnerTexts();
+    const done = (page, ms = 60000) => page.waitForFunction(
+      () => [...document.querySelectorAll(".assistant-message")].some((m) => /The test research found 2 sources/.test(m.innerText)),
+      null, { timeout: ms },
+    ).then(() => true, () => false);
+    {
+      // Research that starts after the old in-request budget, then the app is closed and opened again.
+      const { context, page, errors } = await openLive(PHONE);
+      await context.route("**/api/chat", (route) => route.continue({
+        headers: { ...route.request().headers(), "x-scout-test-started-ago": "250000" },
+      }));
+      const jobs = (await counters()).jobsStarted;
+      await ask(page, "hi");
+      await page.waitForFunction(() => /Scout's test model/.test(document.body.innerText), null, { timeout: 15000 }).catch(() => {});
+      check("research job: \"hi\" gets a direct answer and starts no job",
+        /Scout's test model/.test((await answerText(page)).join(" ")) && (await counters()).jobsStarted === jobs);
+      await page.locator(".topbar-new").click();
+      await ask(page, "Please research ferns for a shady balcony");
+      await page.waitForSelector(".agent-activity", { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(3000);
+      check("  research starts a job, 250 s after the request began", (await counters()).jobsStarted === jobs + 1);
+      await page.close();
+      // The fake research takes 20 s; the app is away for most of it.
+      await new Promise((resolve) => setTimeout(resolve, 12000));
+      const again = await context.newPage();
+      again.on("pageerror", (e) => errors.push(e.message));
+      await again.goto(BASE, { waitUntil: "networkidle" });
+      await again.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+      await again.locator(".mobile-menu").click();
+      await again.locator('[data-mobile="true"] .history-item', { hasText: "Please research ferns" }).click();
+      const finishedAway = await done(again);
+      const texts = await answerText(again);
+      check("  closing the app mid-research: the answer is there when it opens again, exactly once",
+        finishedAway && texts.length === 1 && (texts[0].match(/The test research found 2 sources/g) || []).length === 1,
+        JSON.stringify(texts).slice(0, 300));
+      // The job's last chunks (research complete, then finish) can come in the next response window.
+      check("  its research panel says Research complete with the job's sources",
+        await again.waitForFunction(() => /Research complete/.test(document.querySelector(".agent-activity")?.textContent || ""),
+          null, { timeout: 15000 }).then(() => true, () => false),
+        await again.locator(".agent-activity").innerText().catch(() => ""));
+      check("  the job is over: no Stop button, the answer's actions show",
+        await again.waitForFunction(() => document.querySelectorAll(".answer-actions").length === 1 &&
+          ![...document.querySelectorAll("button")].some((b) => /Stop/.test(b.getAttribute("aria-label") || b.textContent || "")),
+        null, { timeout: 15000 }).then(() => true, () => false));
+      check("  no console or page errors", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+    {
+      // Offline mid-research (the phone loses its connection), then back.
+      const { context, page, errors } = await openLive(PHONE);
+      await ask(page, "Please research shade ferns while offline");
+      await page.waitForSelector(".agent-activity", { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+      await context.setOffline(true);
+      await page.waitForTimeout(8000);
+      await context.setOffline(false);
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      const back = await done(page);
+      const texts = await answerText(page);
+      check("research job: offline mid-research, the answer completes once the connection is back",
+        back && texts.length === 1 && (texts[0].match(/The test research found 2 sources/g) || []).length === 1,
+        JSON.stringify(texts).slice(0, 300));
+      check("  no error banner is left", (await page.locator(".error-banner").count()) === 0,
+        await page.locator(".error-banner").allInnerTexts().then((t) => t.join(" | ")));
+      check("  no page errors", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+    {
+      // Stop ends the job on the server, including its Browser Use run.
+      const { context, page, errors } = await openLive(PHONE);
+      const before = await counters();
+      await ask(page, "Please research ferns and then stop");
+      await page.waitForSelector(".agent-activity", { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(3000);
+      await page.getByRole("button", { name: /Stop/ }).click();
+      await page.waitForTimeout(4000);
+      const after = await counters();
+      check("research job: Stop cancels the job's Browser Use run on the server",
+        after.browserRunsCancelled === before.browserRunsCancelled + 1, JSON.stringify({ before, after }));
+      await page.waitForTimeout(20000);
+      check("  a stopped job never writes its answer later",
+        !/The test research found/.test((await answerText(page)).join(" ")));
+      check("  the question box is ready again", (await page.getByRole("button", { name: /Stop/ }).count()) === 0);
+      check("  no page errors", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+  }
 } finally {
   await browser.close();
 }

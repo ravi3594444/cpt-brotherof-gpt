@@ -13,7 +13,8 @@ import { extractPublicUrls, readPages, ResearchError, searchWeb } from "./resear
 import { visionAgentResearch } from "./vision-agent.ts";
 import type { VisionService } from "./vision.ts";
 
-type Keys = {
+type Fetcher = typeof fetch;
+export type Keys = {
   searchKey: string;
   browserUseKey: string;
   kernelKey: string;
@@ -21,8 +22,36 @@ type Keys = {
   vision?: VisionService;
 };
 
+/**
+ * Chooses the Research engine for a task, as the user chose or as Auto (and JEV) does, and reports
+ * the choice. `timeLeft` leaves out engines that need more time; a Research job has no limit.
+ */
+export async function chooseEngine(
+  task: string,
+  engine: ResearchEngine,
+  keys: Keys,
+  signal: AbortSignal,
+  fetcher: Fetcher,
+  progress: ResearchProgress,
+  timeLeft = Infinity,
+): Promise<Exclude<ResearchEngine, "auto">> {
+  progress.step("Choosing a research path");
+  const chosen = await chooseResearchEngine(
+    engine,
+    { ...keys, visionAgent: !!(keys.kernelKey && keys.vision) },
+    task,
+    signal,
+    fetcher,
+    progress.step,
+    timeLeft,
+  );
+  // The Search API path stays in "searching" until it starts reading pages.
+  progress.update(chosen === "tavily" ? { engine: chosen } : { phase: "reading", engine: chosen });
+  return chosen;
+}
+
 /** Research with the engine the user chose (or Auto's choice) for one task. */
-export function webResearch({ keys, engine, model, conversation, keepAlive }: {
+export function webResearch({ keys, engine, model, conversation, keepAlive, fetcher, maxCostUsd }: {
   keys: Keys;
   engine: ResearchEngine;
   /** The Answer model, which plans Search API queries. */
@@ -31,6 +60,10 @@ export function webResearch({ keys, engine, model, conversation, keepAlive }: {
   conversation: ModelMessage[];
   /** Keeps closing a paid browser going after the response ends (a stop or the ceiling): after() from next/server. */
   keepAlive?: (work: Promise<unknown>) => void;
+  /** The research engines' fetch; test mode passes a fake one. */
+  fetcher?: Fetcher;
+  /** The Browser Use Cloud cost cap per run, in US dollars. */
+  maxCostUsd?: number;
 }): Research {
   const lasting = (work: Promise<unknown>) => {
     try {
@@ -40,29 +73,19 @@ export function webResearch({ keys, engine, model, conversation, keepAlive }: {
     }
   };
   return async (task, request, progress, deadline) => {
+    const services = fetcher ?? fetch;
     // Engines end by the deadline themselves; this stops any request still waiting just after it.
     const signal = AbortSignal.any([request, AbortSignal.timeout(Math.max(0, deadline - Date.now()) + 5000)]);
     try {
-      progress.step("Choosing a research path");
-      const chosen = await chooseResearchEngine(
-        engine,
-        { ...keys, visionAgent: !!(keys.kernelKey && keys.vision) },
-        task,
-        signal,
-        fetch,
-        progress.step,
-        deadline - Date.now(),
-      );
-      // The Search API path stays in "searching" until it starts reading pages.
-      progress.update(chosen === "tavily" ? { engine: chosen } : { phase: "reading", engine: chosen });
+      const chosen = await chooseEngine(task, engine, keys, signal, services, progress, deadline - Date.now());
       if (chosen === "tavily")
         return { ...(await searchApiResearch(task, keys.searchKey, model, conversation, signal, progress)), engine: chosen };
-      const time = { deadline, keepAlive: lasting };
+      const time = { deadline, keepAlive: lasting, maxCostUsd };
       const finding = chosen === "browser_use"
-        ? await browserUseResearch(task, keys.browserUseKey, signal, fetch, progress.step, time)
+        ? await browserUseResearch(task, keys.browserUseKey, signal, services, progress.step, time)
         : chosen === "vision_agent" && keys.vision
-          ? await visionAgentResearch(task, { kernelKey: keys.kernelKey, vision: keys.vision }, signal, fetch, progress.step, time)
-          : await kernelResearch(task, keys.kernelKey, signal, fetch, progress.step, time);
+          ? await visionAgentResearch(task, { kernelKey: keys.kernelKey, vision: keys.vision }, signal, services, progress.step, time)
+          : await kernelResearch(task, keys.kernelKey, signal, services, progress.step, time);
       return { ...finding, engine: chosen };
     } catch (error) {
       if (request.aborted || !signal.aborted) throw error;
@@ -71,7 +94,8 @@ export function webResearch({ keys, engine, model, conversation, keepAlive }: {
   };
 }
 
-async function searchApiResearch(
+/** Search API research: planned queries, then the pages read with extraction. */
+export async function searchApiResearch(
   task: string,
   key: string,
   model: LanguageModel,

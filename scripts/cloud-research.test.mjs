@@ -15,7 +15,7 @@ const browserFetch = async (url, init) => {
   assert.equal(init.headers["X-Browser-Use-API-Key"], "browser-test-key");
   if (url.endsWith("/runs")) {
     const body = JSON.parse(init.body);
-    assert.equal(body.maxCostUsd, 1);
+    assert.equal(body.maxCostUsd, 2);
     assert.equal(body.outputSchema.properties.sources.type, "array");
     return Response.json({ id: runId });
   }

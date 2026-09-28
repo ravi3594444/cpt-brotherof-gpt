@@ -13,7 +13,9 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 | Research | Gathering Sources with a Research engine for the task the Answer model gave the Research tool, before the Answer is written. | search (when a browser does it) |
 | Research tool | The `web_research` tool the Answer model calls when a Question needs Research. The Answer model decides; Scout has no rules of its own for it. | search tool, auto-research |
 | Research engine | The service that gathers Sources: Browser Use Cloud, Kernel, or the Search API. | browser (for the Search API) |
-| Research budget | The time Research may take for one Question: it ends 200 seconds after the request starts (a second try, 220), so the Answer has time before the 280-second ceiling. A Research engine that needs more time than is left does not open its browser. | timeout |
+| Research job | Research that runs outside the chat request, on Vercel Workflows: the research in steps of a few minutes, then the Answer in a step of its own. It has no time limit, keeps going when the app closes, and ends when it finishes, on Stop, or at the cost cap. Plain replies never start one. | background task, durable run |
+| Resume | The app reading a Research job's Answer again from its start, after the app comes back, the connection returns, or its Conversation opens. The replay replaces what the app showed. | reconnect (in UI copy) |
+| Research budget | The time Research may take for one Question when it runs inside the chat request (without Research jobs): it ends 200 seconds after the request starts (a second try, 220), so the Answer has time before the 280-second ceiling. A Research engine that needs more time than is left does not open its browser. | timeout |
 | Partial result | The pages a browser agent had reached when it ran out of time or stopped early, kept as Sources that are not Read, with a warning. | partial answer |
 | Auto | The Research engine setting that lets Scout choose the engine. | default engine |
 | Browser Use Cloud | A hosted browser agent that navigates sites and returns page summaries. | Browser Use session (for Kernel) |

@@ -1,5 +1,5 @@
 import type { ResearchSource } from "./chat-types";
-import { ENGINE_MIN_MS, jsonIn, jsonResponse, kernelBase, notEnoughTime, type ResearchTime } from "./cloud-research.ts";
+import { ENGINE_MIN_MS, jsonIn, jsonResponse, kernelBase, kernelBrowserBody, notEnoughTime, type ResearchTime } from "./cloud-research.ts";
 import { extractPublicUrls, isSearchPage, publicUrl, ResearchError } from "./research.ts";
 import { imageContent, visionChat, type VisionService } from "./vision.ts";
 
@@ -230,9 +230,145 @@ Rules: never log in, sign up, buy, book, pay, accept terms, or submit any form o
   ];
 }
 
+type Keys = { kernelKey: string; vision: VisionService };
+const kernelHeaders = (key: string) => ({ Authorization: `Bearer ${key}`, "Content-Type": "application/json" });
+// Pages the agent keeps, at most.
+const MAX_KEPT = 6;
+
+/** Opens the Kernel browser the vision agent drives, and returns its session id. */
+export async function openVisionBrowser(
+  key: string,
+  signal: AbortSignal,
+  fetcher: Fetcher,
+  progress?: Progress,
+  timeoutSeconds?: number,
+): Promise<string> {
+  const session = await jsonResponse<{ session_id?: string }>(
+    await fetcher(kernelBase, {
+      method: "POST", headers: kernelHeaders(key), body: kernelBrowserBody(timeoutSeconds),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
+    }),
+    "Kernel",
+  );
+  const id = session.session_id;
+  if (!id || !/^[a-zA-Z0-9_-]{8,80}$/.test(id))
+    throw new ResearchError("Kernel did not create a valid browser session.");
+  progress?.("Vision agent opened a Kernel browser");
+  return id;
+}
+
+/** Closes the vision agent's browser, which costs money while open. Never throws. */
+export const closeVisionBrowser = (id: string, key: string, fetcher: Fetcher) =>
+  fetcher(`${kernelBase}/${id}`, {
+    method: "DELETE", headers: kernelHeaders(key), signal: AbortSignal.timeout(5000),
+  }).then(() => {}, () => {});
+
+/** The vision agent between turns, as plain data: never a screenshot. */
+export type VisionAgentState = {
+  browserId: string;
+  question: string;
+  /** Turns taken; the first one also opens the start page. */
+  turns: number;
+  started: boolean;
+  finished: boolean;
+  history: string[];
+  kept: ResearchSource[];
+};
+export const newVisionAgent = (browserId: string, question: string): VisionAgentState =>
+  ({ browserId, question, turns: 0, started: false, finished: false, history: [], kept: [] });
+
+/**
+ * Runs the vision agent's turns in its browser until it finishes, takes `maxSteps` turns, or no
+ * turn fits before `until`. Returns the page it is on; the screenshot stays here.
+ */
+async function takeTurns(
+  agent: VisionAgentState,
+  keys: Keys,
+  signal: AbortSignal,
+  // Ends a request that is still waiting when research must stop.
+  budget: AbortSignal,
+  fetcher: Fetcher,
+  progress: Progress | undefined,
+  { maxSteps, until, turnMs, clock }: { maxSteps: number; until: number; turnMs: number; clock: () => number },
+): Promise<PageObservation> {
+  const step = async (input: { start?: string; action?: AgentAction }) => {
+    const result = await jsonResponse<{ success?: boolean; result?: unknown }>(
+      await fetcher(`${kernelBase}/${agent.browserId}/playwright/execute`, {
+        method: "POST", headers: kernelHeaders(keys.kernelKey),
+        body: JSON.stringify({ code: stepScript(input), timeout_sec: 40 }),
+        signal: AbortSignal.any([budget, AbortSignal.timeout(50000)]),
+      }),
+      "Kernel",
+    );
+    if (!result.success) throw new ResearchError("The browser could not carry out that step. Try again or choose another engine.");
+    return observation(result.result);
+  };
+  let page: PageObservation;
+  if (!agent.started) {
+    const direct = extractPublicUrls(agent.question)[0];
+    page = await step({
+      start: direct || `https://www.bing.com/search?q=${encodeURIComponent(agent.question.slice(0, 300))}`,
+    });
+    agent.started = true;
+    progress?.(direct ? "Vision agent opened the supplied page" : "Vision agent searched the web");
+  } else page = await step({});
+  while (!agent.finished && agent.turns < maxSteps && clock() + turnMs < until) {
+    signal.throwIfAborted();
+    agent.turns++;
+    const reply = await visionChat(
+      keys.vision,
+      prompt(agent.question, page, agent.turns, maxSteps, agent.history.slice(-30), agent.kept.map((s) => s.title)),
+      budget,
+      fetcher,
+      300,
+    );
+    const action = parseAgentAction(reply, page);
+    if (!action) {
+      agent.history.push("(a reply that was not an allowed action)");
+      continue;
+    }
+    if (action.action === "finish") {
+      agent.finished = true;
+      break;
+    }
+    if (action.action === "read") {
+      if (keepPage(agent, page)) progress?.(describe(action, page));
+      agent.history.push(describe(action, page));
+      continue;
+    }
+    const done = describe(action, page);
+    progress?.(done);
+    agent.history.push(done);
+    page = await step({ action });
+  }
+  return page;
+}
+
+/** Keeps a page the agent read as a Source; false for a search page or one with no text. */
+function keepPage(agent: VisionAgentState, p: PageObservation) {
+  const url = publicUrl(p.url);
+  if (!url || isSearchPage(url) || !p.text.trim()) return false;
+  const known = agent.kept.findIndex((s) => s.url === url);
+  if (known < 0 && agent.kept.length >= MAX_KEPT) return false;
+  const image = p.image?.startsWith("https:") ? publicUrl(p.image) : undefined;
+  const source = {
+    url,
+    title: p.title || new URL(url).hostname,
+    content: p.text.slice(0, 6000),
+    read: true,
+    ...(image ? { image } : {}),
+  };
+  if (known < 0) agent.kept.push(source);
+  else agent.kept[known] = source;
+  return true;
+}
+
+/** Keeps the page the agent ended on if it kept nothing else. */
+const keepLastPage = (agent: VisionAgentState, page: PageObservation) => !agent.kept.length && keepPage(agent, page);
+
 export async function visionAgentResearch(
   question: string,
-  keys: { kernelKey: string; vision: VisionService },
+  keys: Keys,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
@@ -247,93 +383,66 @@ export async function visionAgentResearch(
   if (end - startedAt < ENGINE_MIN_MS.vision_agent) throw notEnoughTime("vision_agent");
   // Requests end then too, so a slow page or model cannot hold research past it.
   const budget = AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, end - startedAt))]);
-  const headers = { Authorization: `Bearer ${keys.kernelKey}`, "Content-Type": "application/json" };
-  const session = await jsonResponse<{ session_id?: string }>(
-    await fetcher(kernelBase, {
-      method: "POST", headers, body: "{}", signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
-    }),
-    "Kernel",
-  );
-  const id = session.session_id;
-  if (!id || !/^[a-zA-Z0-9_-]{8,80}$/.test(id))
-    throw new ResearchError("Kernel did not create a valid browser session.");
-  progress?.("Vision agent opened a Kernel browser");
-  const step = async (input: { start?: string; action?: AgentAction }) => {
-    const result = await jsonResponse<{ success?: boolean; result?: unknown }>(
-      await fetcher(`${kernelBase}/${id}/playwright/execute`, {
-        method: "POST", headers,
-        body: JSON.stringify({ code: stepScript(input), timeout_sec: 40 }),
-        signal: AbortSignal.any([budget, AbortSignal.timeout(50000)]),
-      }),
-      "Kernel",
-    );
-    if (!result.success) throw new ResearchError("The browser could not carry out that step. Try again or choose another engine.");
-    return observation(result.result);
-  };
-  const kept = new Map<string, ResearchSource>();
+  const id = await openVisionBrowser(keys.kernelKey, signal, fetcher, progress);
+  const agent = newVisionAgent(id, question);
   try {
-    const direct = extractPublicUrls(question)[0];
-    let page = await step({
-      start: direct || `https://www.bing.com/search?q=${encodeURIComponent(question.slice(0, 300))}`,
-    });
-    progress?.(direct ? "Vision agent opened the supplied page" : "Vision agent searched the web");
-    const keep = (p: PageObservation) => {
-      const url = publicUrl(p.url);
-      if (!url || isSearchPage(url) || !p.text.trim()) return false;
-      const image = p.image?.startsWith("https:") ? publicUrl(p.image) : undefined;
-      kept.set(url, {
-        url,
-        title: p.title || new URL(url).hostname,
-        content: p.text.slice(0, 6000),
-        read: true,
-        ...(image ? { image } : {}),
-      });
-      return true;
-    };
-    const history: string[] = [];
-    let finished = false;
-    for (let n = 1; n <= maxSteps && clock() < end; n++) {
-      signal.throwIfAborted();
-      const reply = await visionChat(keys.vision, prompt(question, page, n, maxSteps, history, [...kept.values()].map((s) => s.title)), budget, fetcher, 300);
-      const action = parseAgentAction(reply, page);
-      if (!action) {
-        history.push("(a reply that was not an allowed action)");
-        continue;
-      }
-      if (action.action === "finish") {
-        finished = true;
-        break;
-      }
-      if (action.action === "read") {
-        if (keep(page)) progress?.(describe(action, page));
-        history.push(describe(action, page));
-        continue;
-      }
-      const done = describe(action, page);
-      progress?.(done);
-      history.push(done);
-      page = await step({ action });
-    }
-    // Keep the page the agent ended on if it kept nothing else.
-    if (!kept.size && keep(page)) progress?.(describe({ action: "read" }, page));
-    const sources = [...kept.values()].slice(0, 6);
+    const page = await takeTurns(agent, keys, signal, budget, fetcher, progress, { maxSteps, until: end, turnMs: 0, clock });
+    if (keepLastPage(agent, page)) progress?.(describe({ action: "read" }, page));
+    const sources = agent.kept.slice(0, MAX_KEPT);
     if (!sources.length)
       throw new ResearchError("The vision agent did not reach a readable public page. Try a narrower question.");
     return {
       sources,
-      ...(finished ? {} : { warning: clock() >= end ? "Vision agent ran out of time" : "Vision agent reached its step limit" }),
+      ...(agent.finished ? {} : { warning: clock() >= end ? "Vision agent ran out of time" : "Vision agent reached its step limit" }),
     };
   } catch (error) {
     // Out of time mid-step: the pages it already read still count.
     if (signal.aborted || !budget.aborted) throw error;
-    if (!kept.size) throw new ResearchError("The vision agent ran out of time before it read a page. Try a narrower question.");
-    return { sources: [...kept.values()].slice(0, 6), warning: "Vision agent ran out of time" };
+    if (!agent.kept.length) throw new ResearchError("The vision agent ran out of time before it read a page. Try a narrower question.");
+    return { sources: agent.kept.slice(0, MAX_KEPT), warning: "Vision agent ran out of time" };
   } finally {
     // A session costs money while open; close it even when a step fails.
-    const closing = fetcher(`${kernelBase}/${id}`, {
-      method: "DELETE", headers, signal: AbortSignal.timeout(5000),
-    }).catch(() => {});
+    const closing = closeVisionBrowser(id, keys.kernelKey, fetcher);
     keepAlive?.(closing);
     await closing;
+  }
+}
+
+// A Research job's vision agent has no time limit, so it may take many more turns; each batch of
+// turns fits one step, and a turn (a model reply and a browser step) can take up to 100 seconds.
+export const JOB_VISION_STEPS = 60;
+export const VISION_BATCH_MS = 240_000;
+const TURN_MS = 100_000;
+
+/**
+ * One batch of a Research job's vision agent turns, in the browser `agent.browserId`. Returns the
+ * agent, with its Sources once it is done (finished or out of turns); throws a ResearchError when it
+ * ends without a readable page. The job closes the browser after the last batch; a stopped job
+ * (an aborted signal) closes it here, since no later step runs.
+ */
+export async function visionAgentBatch(
+  agent: VisionAgentState,
+  keys: Keys,
+  signal: AbortSignal,
+  fetcher: Fetcher,
+  progress: Progress | undefined,
+  { until, maxSteps = JOB_VISION_STEPS, clock = Date.now, turnMs = TURN_MS }:
+    { until: number; maxSteps?: number; clock?: () => number; turnMs?: number },
+): Promise<{ agent: VisionAgentState; done: false } | { agent: VisionAgentState; done: true; result: { sources: ResearchSource[]; warning?: string } }> {
+  const next = structuredClone(agent);
+  try {
+    const page = await takeTurns(next, keys, signal, signal, fetcher, progress, { maxSteps, until, turnMs, clock });
+    if (!next.finished && next.turns < maxSteps) return { agent: next, done: false };
+    if (keepLastPage(next, page)) progress?.(describe({ action: "read" }, page));
+    if (!next.kept.length)
+      throw new ResearchError("The vision agent did not reach a readable public page. Try a narrower question.");
+    return {
+      agent: next,
+      done: true,
+      result: { sources: next.kept.slice(0, MAX_KEPT), ...(next.finished ? {} : { warning: "Vision agent reached its step limit" }) },
+    };
+  } catch (error) {
+    if (signal.aborted) await closeVisionBrowser(agent.browserId, keys.kernelKey, fetcher);
+    throw error;
   }
 }

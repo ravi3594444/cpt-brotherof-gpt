@@ -1,5 +1,6 @@
 import { serverConfig } from "@/lib/server-config";
 import { ACCESS_HEADER, accessAllowed } from "@/lib/access";
+import { testCounters } from "@/lib/test-mode";
 import type { ScoutConfig } from "@/lib/chat-types";
 
 export async function GET(request: Request) {
@@ -35,6 +36,8 @@ export async function GET(request: Request) {
             jev: !!config.jev,
             vision: !!config.vision,
           },
+          durable: config.durable,
+          ...(config.testMode && { test: { jobsStarted: testCounters().jobsStarted, browserRunsCancelled: testCounters().browserRunsCancelled } }),
         };
   return Response.json(body, { headers: { "Cache-Control": "no-store" } });
 }
