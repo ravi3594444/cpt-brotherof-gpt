@@ -9,7 +9,7 @@ import { describePhotos } from "@/lib/vision";
 import { demoAnswer, withoutCitations } from "@/lib/demo";
 import type { Chunk } from "@/lib/job-stream";
 import { ResearchError } from "@/lib/research";
-import { answerModel, jobInput, jobTiming, researchServices } from "@/lib/research-job";
+import { answerModel, jobInput, jobTiming, researchServices, writerModel } from "@/lib/research-job";
 import { webResearch } from "@/lib/web-research";
 import type { ScoutMessage } from "@/lib/chat-types";
 const inputSchema = z.object({
@@ -199,6 +199,8 @@ export async function POST(request: Request) {
       const streamed: Chunk[] = [];
       await streamAnswer({
         model,
+        // The vision model, which is fast, writes the Answer after research.
+        researchWriter: writerModel(config),
         messages: answerMessages,
         question,
         webEnabled: input.webEnabled,

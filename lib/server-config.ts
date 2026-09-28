@@ -46,6 +46,9 @@ export function serverConfig(e: Env = process.env) {
       apiKey: e.VISION_MODEL_API_KEY,
       aimlapiKey: e.AIMLAPI_API_KEY,
     }),
+    // Who writes the Answer after Research: the vision model, which is fast, unless RESEARCH_WRITER=answer
+    // keeps the Answer model.
+    researchWriter: e.RESEARCH_WRITER?.trim().toLowerCase() === "answer" ? ("answer" as const) : ("vision" as const),
     // The most one question's research may spend; Browser Use Cloud runs are capped at it.
     maxCostUsd: researchMaxCostUsd(e.RESEARCH_MAX_COST_USD),
     durable: durableResearch(e),

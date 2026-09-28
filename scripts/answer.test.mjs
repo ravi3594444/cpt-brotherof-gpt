@@ -73,8 +73,8 @@ const sources = [
 ];
 function fakeResearch(outcome = { sources, engine: "kernel" }) {
   const tasks = [];
-  const research = async (task, signal, progress) => {
-    tasks.push(task);
+  const research = async (request, signal, progress) => {
+    tasks.push(request.task);
     progress.step("Selected Kernel");
     progress.update({ phase: "reading", engine: "kernel" });
     if (outcome instanceof Error) throw outcome;
@@ -135,7 +135,7 @@ test("when the model calls the research tool, research runs once with its task a
   assert.deepEqual(data.queries, ["Ferns that suit a shady balcony"]);
   assert.equal(data.steps[0], "Atria started research: “Ferns that suit a shady balcony”");
   assert.ok(data.steps.includes("Selected Kernel"));
-  assert.equal(data.steps.at(-1), "Atria is writing an answer from the sources");
+  assert.equal(data.steps.at(-1), "Atria is writing the answer from the sources");
   assert.deepEqual(data.sources.map((s) => s.url), sources.map((s) => s.url));
   assert.deepEqual(
     parts.filter((p) => p.type === "source-url"),
@@ -153,9 +153,14 @@ test("when the model calls the research tool, research runs once with its task a
     { number: 2, title: "Balcony plants", url: "https://plants.example/balcony", content: "Many ferns grow well on shady balconies.", kind: "search excerpt" },
   ]]);
 
-  assert.equal(answerText(parts), "Let me look that up.\n\nMost ferns like shade [1](https://ferns.example/care).");
-  assert.equal(parts.filter((p) => p.type === "text-start").length, 1);
-  assert.equal(parts.filter((p) => p.type === "text-end").length, 1);
+  // The words before the call streamed, then moved into Thinking; the Answer is what came after research.
+  const reset = parts.findIndex((p) => p.type === "reset-step");
+  assert.ok(reset > 0);
+  const replay = parts.slice(reset + 1);
+  assert.deepEqual(replay.filter((p) => p.type === "reasoning-delta").map((p) => p.delta), ["Let me look that up."]);
+  assert.equal(answerText(replay), "Most ferns like shade [1](https://ferns.example/care).");
+  assert.equal(replay.filter((p) => p.type === "text-start").length, 1);
+  assert.equal(replay.filter((p) => p.type === "text-end").length, 1);
   assert.equal(parts.at(-1).type, "finish");
 });
 
@@ -210,9 +215,9 @@ test("an unexpected research failure gets a plain message, not the raw error", a
 function timedResearch(outcomes) {
   const clock = { now: 1_000_000 };
   const calls = [];
-  const research = async (task, signal, progress, deadline) => {
+  const research = async (request, signal, progress, deadline) => {
     const outcome = outcomes[calls.length];
-    calls.push({ task, deadline, at: clock.now });
+    calls.push({ task: request.task, deadline, at: clock.now });
     progress.step(`Selected ${outcome.engine === "browser_use" ? "Browser Use Cloud" : "Kernel"}`);
     progress.update({ phase: "reading", engine: outcome.engine || "kernel" });
     clock.now += outcome.took;
@@ -265,7 +270,7 @@ test("a quick research failure lets the model try once more, and the answer cite
     `Research did not finish: ${timedOut.message}`,
     "Atria started research again: “top rated men's linen shirts on shein.com”",
     "Selected Kernel",
-    "Atria is writing an answer from the sources",
+    "Atria is writing the answer from the sources",
   ]);
   assert.deepEqual(data.sources.map((s) => s.url), shirts.map((s) => s.url));
   assert.deepEqual(parts.filter((p) => p.type === "source-url").map((p) => p.url), shirts.map((s) => s.url));

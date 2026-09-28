@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseAgentAction, visionAgentResearch } from "../lib/vision-agent.ts";
-import { ResearchError } from "../lib/research.ts";
+import { ResearchError, researchTask } from "../lib/research.ts";
 
 const signal = new AbortController().signal;
 const vision = { baseURL: "https://api.aimlapi.com/v1", apiKey: "aiml-key", model: "deepseek/deepseek-v4.1-flash" };
@@ -56,7 +56,7 @@ function fakeServices(pages, replies) {
     calls.vision.push(JSON.parse(init.body));
     const reply = replies[Math.min(r++, replies.length - 1)];
     if (reply instanceof Error) throw reply;
-    return Response.json({ choices: [{ message: { content: reply } }] });
+    return Response.json({ choices: [{ message: { content: reply, ...(!reply && { reasoning_content: "Thinking about the page" }) } }] });
   };
   return { fetcher, calls };
 }
@@ -164,4 +164,90 @@ test("every browser step Scout sends is valid JavaScript", async () => {
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
   assert.equal(calls.kernel.length, 6);
   for (const code of calls.kernel) assert.doesNotThrow(() => new AsyncFunction("page", "context", code));
+});
+
+const articleAt = (n) => ({ ...article, url: `https://site${n}.example/ferns`, title: `Fern guide ${n}` });
+const openSite = (n) => JSON.stringify({ action: "open", url: `https://site${n}.example/ferns` });
+const userText = (call) => call.messages.at(-1).content[0].text;
+
+test("the agent starts its search with the query, not the long task sentence", async () => {
+  const { fetcher, calls } = fakeServices([article], ['{"action":"read"}', '{"action":"finish"}']);
+  const task = researchTask({ task: "Explain how to grow ferns on a shady balcony, with watering and soil tips", query: "grow ferns shady balcony" });
+  await visionAgentResearch(task, { kernelKey: "k", vision }, signal, fetcher);
+  assert.match(calls.kernel[0], /const start = "https:\/\/www\.bing\.com\/search\?q=grow%20ferns%20shady%20balcony";/);
+  assert.ok(!calls.kernel[0].includes("Explain"));
+});
+
+test("the agent's prompt says how deep to go and how many pages to keep", async () => {
+  const quick = fakeServices([article], ['{"action":"finish"}']);
+  await visionAgentResearch(researchTask("Q?"), { kernelKey: "k", vision }, signal, quick.fetcher);
+  assert.match(quick.calls.vision[0].messages[0].content, /Keep about 3 good pages/);
+  assert.match(userText(quick.calls.vision[0]), /Research depth: quick/);
+  const deep = fakeServices([article], ['{"action":"finish"}']);
+  await visionAgentResearch(researchTask({ task: "Q?", depth: "deep" }), { kernelKey: "k", vision }, signal, deep.fetcher);
+  assert.match(deep.calls.vision[0].messages[0].content, /Be thorough: keep up to 6 good pages/);
+  assert.match(userText(deep.calls.vision[0]), /Research depth: deep/);
+});
+
+test("the agent finishes by itself once it has kept enough pages: 3 for quick research, 6 for deep", async () => {
+  const sites = [page, ...Array.from({ length: 8 }, (_, i) => articleAt(i + 1))];
+  const browse = [openSite(1), '{"action":"read"}', openSite(2), '{"action":"read"}', openSite(3), '{"action":"read"}',
+    openSite(4), '{"action":"read"}', openSite(5), '{"action":"read"}', openSite(6), '{"action":"read"}', openSite(7), '{"action":"read"}'];
+  const quick = fakeServices(sites, browse);
+  const found = await visionAgentResearch(researchTask("Ferns?"), { kernelKey: "k", vision }, signal, quick.fetcher);
+  assert.equal(quick.calls.vision.length, 6, "no model call after the third page");
+  assert.deepEqual(found.sources.map((s) => s.title), ["Fern guide 1", "Fern guide 2", "Fern guide 3"]);
+  assert.equal(found.warning, undefined);
+  const deep = fakeServices(sites, browse);
+  const thorough = await visionAgentResearch(researchTask({ task: "Ferns?", depth: "deep" }), { kernelKey: "k", vision }, signal, deep.fetcher);
+  assert.equal(deep.calls.vision.length, 12);
+  assert.equal(thorough.sources.length, 6);
+  assert.equal(thorough.warning, undefined);
+});
+
+test("in the request the agent takes up to 8 steps for quick research and 16 for deep", async () => {
+  for (const [depth, steps] of [["quick", 8], ["deep", 16]]) {
+    const { fetcher, calls } = fakeServices([article], ['{"action":"scroll","direction":"down"}']);
+    const { warning } = await visionAgentResearch(researchTask({ task: "Q?", depth }), { kernelKey: "k", vision }, signal, fetcher);
+    assert.equal(calls.vision.length, steps, depth);
+    assert.match(warning, /step limit/);
+  }
+});
+
+test("each step's vision reply has room to think", async () => {
+  const { fetcher, calls } = fakeServices([article], ['{"action":"finish"}']);
+  await visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, fetcher);
+  assert.equal(calls.vision[0].max_tokens, 1200);
+});
+
+test("an empty reply is asked again with a shorter prompt, and a second empty reply finishes with the pages kept", async () => {
+  const scrolls = Array.from({ length: 7 }, () => '{"action":"scroll","direction":"down"}');
+  const { fetcher, calls } = fakeServices([article], ['{"action":"read"}', ...scrolls, "", ""]);
+  const steps = [];
+  const { sources, warning } = await visionAgentResearch("How do I grow ferns?", { kernelKey: "k", vision }, signal, fetcher, (s) => steps.push(s), { maxSteps: 12 });
+  assert.equal(calls.vision.length, 10);
+  assert.deepEqual(sources.map((s) => s.url), ["https://example.com/ferns"]);
+  assert.match(warning, /stopped replying/);
+  const [full, retry] = calls.vision.slice(-2).map(userText);
+  assert.ok(retry.length < full.length, "the second ask is shorter");
+  assert.equal((full.match(/Scrolled down/g) || []).length, 7);
+  assert.equal((retry.match(/Scrolled down/g) || []).length, 5, "it keeps only the last few actions");
+  assert.match(retry, /Reply with only one JSON action/);
+  assert.equal(calls.deleted, true);
+});
+
+test("a reply that is not an allowed action is asked again once in the same step", async () => {
+  const { fetcher, calls } = fakeServices([article], ["Let me look at this page first.", '{"action":"read"}', '{"action":"finish"}']);
+  const { sources, warning } = await visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, fetcher, undefined, { maxSteps: 2 });
+  assert.equal(calls.vision.length, 3);
+  assert.equal(sources.length, 1);
+  assert.equal(warning, undefined, "the agent finished within its two steps");
+});
+
+test("an agent whose vision model stops replying before it read anything fails plainly", async () => {
+  const { fetcher, calls } = fakeServices([{ ...page, text: "Results" }], ["", ""]);
+  await assert.rejects(visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, fetcher),
+    (error) => error instanceof ResearchError && /empty reply/.test(error.message));
+  assert.equal(calls.vision.length, 2);
+  assert.equal(calls.deleted, true);
 });

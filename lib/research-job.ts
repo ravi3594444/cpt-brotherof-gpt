@@ -1,6 +1,6 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel, ModelMessage } from "ai";
-import type { ResearchHandoff } from "./answer.ts";
+import type { ResearchHandoff, ResearchWriter } from "./answer.ts";
 import { BROWSER_USE_WINDOW_MS, type ResearchEngine } from "./cloud-research.ts";
 import { compactChunks, type Chunk } from "./job-stream.ts";
 import { ResearchError } from "./research.ts";
@@ -63,6 +63,21 @@ export function answerModel(config: ServerConfig): LanguageModel {
     apiKey: config.apiKey,
   });
   return provider(config.model);
+}
+
+/** A model's name to show from its id: "vendor/some-model-2.1" is "Some Model 2.1". */
+const modelLabel = (id: string) =>
+  (id.split("/").at(-1) || id).split(/[-_\s]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
+
+/**
+ * The research writer: the vision model, which writes the Answer after Research much faster than a
+ * reasoning Answer model. None in test mode, without a vision model, or with RESEARCH_WRITER=answer.
+ */
+export function writerModel(config: ServerConfig): ResearchWriter | undefined {
+  const vision = config.vision;
+  if (config.testMode || config.researchWriter === "answer" || !vision?.baseURL.startsWith("https://")) return;
+  const provider = createOpenAICompatible({ name: "scout-writer", baseURL: vision.baseURL, apiKey: vision.apiKey });
+  return { model: provider(vision.model), name: modelLabel(vision.model) };
 }
 
 /** The research engines' keys and fetch; test mode has only a fake Browser Use Cloud. */

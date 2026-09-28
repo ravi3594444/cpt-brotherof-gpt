@@ -9,6 +9,23 @@ export class ResearchError extends Error {
 }
 /** HTTP statuses that repeat when asked again within seconds: a rejected key, no credit, or a limit. */
 export const repeats = (status: number) => [401, 402, 403, 429].includes(status);
+
+/** How far Research goes: "quick" reads a few pages; "deep" is for thorough research the user asked for. */
+export type ResearchDepth = "quick" | "deep";
+/** What the Answer model asked the Research tool for: the task, a short search query, and the depth. */
+export type ResearchTask = { task: string; query: string; depth: ResearchDepth };
+/** A Research task as given: plain text, or the tool's input, which a provider may leave fields out of. */
+export type ResearchInput = string | { task: string; query?: unknown; depth?: unknown };
+const words = (text: string, most: number) => text.trim().split(/\s+/).slice(0, most).join(" ");
+/**
+ * A Research task with its fallbacks: without a query, the task's first 12 words; without a known
+ * depth, quick. A query is at most 16 words, so the engines never search with a whole sentence.
+ */
+export function researchTask(input: ResearchInput): ResearchTask {
+  const { task, query, depth } = typeof input === "string" ? { task: input } : input;
+  const given = typeof query === "string" ? words(query, 16).slice(0, 200) : "";
+  return { task, query: given || words(task, 12), depth: depth === "deep" ? "deep" : "quick" };
+}
 export function publicUrl(value: string): string | undefined {
   try {
     const u = new URL(value);

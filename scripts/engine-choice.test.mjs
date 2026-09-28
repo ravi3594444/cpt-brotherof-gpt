@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chooseResearchEngine, jevService } from "../lib/cloud-research.ts";
+import { researchTask } from "../lib/research.ts";
 
 const signal = new AbortController().signal;
 const allKeys = { browserUseKey: "b", kernelKey: "k", jev: jevService({ aimlapiKey: "j" }) };
@@ -8,9 +9,11 @@ const noJevCall = async () => assert.fail("JEV should not be called");
 const jevAnswers = (choice, confidence) => async () =>
   Response.json({ answers: { route: { choice, confidence } } });
 
-async function choose(requested, keys, fetcher = noJevCall) {
+const quick = researchTask("a question");
+const deep = researchTask({ task: "a question", depth: "deep" });
+async function choose(requested, keys, fetcher = noJevCall, request = quick) {
   const steps = [];
-  const engine = await chooseResearchEngine(requested, keys, "a question", signal, fetcher, (s) => steps.push(s));
+  const engine = await chooseResearchEngine(requested, keys, request, signal, fetcher, (s) => steps.push(s));
   return { engine, steps };
 }
 
@@ -52,42 +55,90 @@ test("a confident JEV answer is logged as JEV's choice", async () => {
   );
 });
 
-test("JEV is told Kernel is the default and Browser Use is only for tasks that need it", async () => {
-  let route;
+test("JEV is told plain Kernel is the default and the fastest, the vision agent for using a site, and Browser Use only when needed", async () => {
+  let body;
   const jevSeeing = async (_url, init) => {
-    route = JSON.parse(init.body).questions.route;
+    body = JSON.parse(init.body);
     return Response.json({ answers: { route: { choice: "vision_agent", confidence: 0.8 } } });
   };
   await choose("auto", { ...allKeys, visionAgent: true }, jevSeeing);
-  assert.match(route.instructions, /Kernel/);
-  assert.match(route.criteria.vision_agent, /most research/i);
+  const { route } = body.questions;
+  assert.match(route.instructions, /kernel is the default and the fastest/i);
+  assert.match(route.criteria.kernel, /default/i);
+  assert.match(route.criteria.kernel, /fastest/i);
+  assert.match(route.criteria.kernel, /facts, explanations, how things work, news, reviews/);
+  assert.match(route.criteria.vision_agent, /like a person/);
+  assert.match(route.criteria.vision_agent, /searching inside a site, filters, menus, product listings and prices, pictures, layouts/);
   assert.match(route.criteria.browser_use, /only when/i);
+  assert.match(body.state, /a question/);
+  assert.match(body.state, /Research depth: quick/);
+  await choose("auto", { ...allKeys, visionAgent: true }, jevSeeing, deep);
+  assert.match(body.state, /Research depth: deep/);
 });
 
-test("Browser Use Cloud is used only when JEV is sure the task needs it", async () => {
+test("Browser Use Cloud is used on a first try only when JEV is sure the task needs it", async () => {
   assert.deepEqual(await choose("auto", allKeys, jevAnswers("browser_use", 0.3)),
     { engine: "kernel", steps: ["JEV was unsure; using Kernel"] });
   assert.deepEqual(await choose("auto", { ...allKeys, visionAgent: true }, jevAnswers("browser_use", 0.5)),
+    { engine: "kernel", steps: ["JEV was unsure; using Kernel"] });
+  assert.deepEqual(await choose("auto", { ...allKeys, visionAgent: true }, jevAnswers("browser_use", 0.5), deep),
     { engine: "vision_agent", steps: ["JEV was unsure; using Vision agent"] });
+  assert.deepEqual(await choose("auto", { ...allKeys, visionAgent: true }, jevAnswers("browser_use", 0.65)),
+    { engine: "browser_use", steps: ["JEV selected Browser Use Cloud"] });
 });
 
-test("a low-confidence Kernel answer browses with the vision agent instead", async () => {
-  const { engine, steps } = await choose("auto", { ...allKeys, visionAgent: true }, jevAnswers("kernel", 0.4));
-  assert.equal(engine, "vision_agent");
-  assert.deepEqual(steps, ["JEV was unsure; using Vision agent"]);
+test("an unsure plain-Kernel answer stays Kernel for quick research, and browses with the vision agent for deep", async () => {
+  const withAgent = { ...allKeys, visionAgent: true };
+  assert.deepEqual(await choose("auto", withAgent, jevAnswers("kernel", 0.4)), { engine: "kernel", steps: ["JEV selected Kernel"] });
+  assert.deepEqual(await choose("auto", withAgent, jevAnswers("kernel", 0.4), deep),
+    { engine: "vision_agent", steps: ["JEV was unsure; using Vision agent"] });
   // Without the vision agent, Kernel stays Kernel.
-  assert.deepEqual(await choose("auto", allKeys, jevAnswers("kernel", 0.4)), { engine: "kernel", steps: ["JEV selected Kernel"] });
+  assert.deepEqual(await choose("auto", allKeys, jevAnswers("kernel", 0.4), deep), { engine: "kernel", steps: ["JEV selected Kernel"] });
+  // A sure answer is kept whatever the depth.
+  assert.deepEqual(await choose("auto", withAgent, jevAnswers("kernel", 0.9), deep), { engine: "kernel", steps: ["JEV selected Kernel"] });
+  assert.deepEqual(await choose("auto", withAgent, jevAnswers("vision_agent", 0.3)), { engine: "vision_agent", steps: ["JEV selected Vision agent"] });
 });
 
-test("a JEV failure is logged as a fallback, not as JEV's choice", async () => {
-  for (const fetcher of [
-    async () => new Response("overloaded", { status: 529 }),
-    async () => { throw new TypeError("network down"); },
-  ]) {
-    const { engine, steps } = await choose("auto", { ...allKeys, visionAgent: true }, fetcher);
-    assert.equal(engine, "vision_agent");
-    assert.deepEqual(steps, ["JEV was unavailable; using Vision agent"]);
+test("a JEV failure says why, uses the engine the depth prefers, and logs the cause without the key", async () => {
+  const withAgent = { ...allKeys, visionAgent: true, jev: jevService({ aimlapiKey: "secret-jev-key" }) };
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (...args) => warned.push(args.join(" "));
+  try {
+    const cases = [
+      [async () => new Response(`{"error":"insufficient credit for secret-jev-key"}`, { status: 402 }), "unavailable (HTTP 402)"],
+      [async () => new Response("overloaded", { status: 529 }), "unavailable (HTTP 529)"],
+      [async () => { throw new TypeError("network down"); }, "unavailable (network error)"],
+      [async () => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); }, "unavailable (timed out)"],
+      [async () => Response.json({ answers: { route: { choice: "teleport", confidence: 0.9 } } }), "unavailable (unexpected answer)"],
+      [async () => new Response("not json", { status: 200 }), "unavailable (unexpected answer)"],
+    ];
+    for (const [fetcher, why] of cases) {
+      assert.deepEqual(await choose("auto", withAgent, fetcher), { engine: "kernel", steps: [`JEV was ${why}; using Kernel`] });
+      assert.deepEqual(await choose("auto", withAgent, fetcher, deep), { engine: "vision_agent", steps: [`JEV was ${why}; using Vision agent`] });
+    }
+  } finally {
+    console.warn = warn;
   }
+  assert.ok(warned.some((w) => /HTTP 402/.test(w) && /insufficient credit/.test(w)), warned.join("\n"));
+  assert.ok(warned.some((w) => /HTTP 529/.test(w) && /overloaded/.test(w)));
+  assert.ok(warned.some((w) => /timed out/.test(w)));
+  assert.ok(warned.some((w) => /network down/.test(w)));
+  assert.ok(warned.some((w) => /teleport/.test(w)));
+  assert.ok(warned.every((w) => !w.includes("secret-jev-key")), "the key never reaches the log");
+});
+
+test("the logged JEV response body is cut to about 300 characters", async () => {
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (...args) => warned.push(args.join(" "));
+  try {
+    await choose("auto", allKeys, async () => new Response("x".repeat(5000), { status: 500 }));
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(warned.length, 1);
+  assert.ok(warned[0].length < 400, String(warned[0].length));
 });
 
 test("the vision agent can be chosen directly, or by JEV in Auto", async () => {
@@ -113,7 +164,7 @@ test("Auto leaves out browser agents that need more time than research has left"
   const keys = { ...allKeys, visionAgent: true };
   const pick = async (timeLeft, fetcher = noJevCall) => {
     const steps = [];
-    const engine = await chooseResearchEngine("auto", keys, "a question", signal, fetcher, (s) => steps.push(s), timeLeft);
+    const engine = await chooseResearchEngine("auto", keys, quick, signal, fetcher, (s) => steps.push(s), timeLeft);
     return { engine, steps };
   };
   assert.deepEqual(await pick(40_000), {
@@ -131,20 +182,23 @@ test("Auto leaves out browser agents that need more time than research has left"
   assert.equal((await pick(120_000, jevAnswers("browser_use", 0.9))).engine, "browser_use");
   assert.deepEqual(await pick(10_000, jevAnswers("kernel", 0.9)), { engine: "kernel", steps: ["JEV selected Kernel"] });
   // An engine the user chose is kept; it says itself when time is too short.
-  assert.equal(await chooseResearchEngine("browser_use", keys, "q", signal, noJevCall, undefined, 10_000), "browser_use");
+  assert.equal(await chooseResearchEngine("browser_use", keys, quick, signal, noJevCall, undefined, 10_000), "browser_use");
 });
 
-test("Auto without JEV prefers the vision agent, then Kernel, then Browser Use Cloud", async () => {
-  assert.equal((await choose("auto", { ...allKeys, jev: undefined, visionAgent: true })).engine, "vision_agent");
-  assert.equal((await choose("auto", { ...allKeys, jev: undefined })).engine, "kernel");
-  assert.equal((await choose("auto", { ...allKeys, kernelKey: "", jev: undefined })).engine, "browser_use");
+test("Auto without JEV prefers Kernel, then the vision agent, for quick research, and the vision agent first for deep", async () => {
+  const noJev = { ...allKeys, jev: undefined };
+  assert.equal((await choose("auto", { ...noJev, visionAgent: true })).engine, "kernel");
+  assert.equal((await choose("auto", { ...noJev, visionAgent: true }, noJevCall, deep)).engine, "vision_agent");
+  assert.equal((await choose("auto", noJev, noJevCall, deep)).engine, "kernel");
+  assert.equal((await choose("auto", { ...noJev, kernelKey: "" })).engine, "browser_use");
+  assert.equal((await choose("auto", { ...noJev, kernelKey: "" }, noJevCall, deep)).engine, "browser_use");
 });
 
 test("a second try leaves out the engine that failed, and Browser Use Cloud is the backup", async () => {
   const keys = { ...allKeys, visionAgent: true };
-  const again = async (avoid, fetcher = noJevCall, k = keys) => {
+  const again = async (avoid, fetcher = noJevCall, k = keys, request = quick) => {
     const steps = [];
-    const engine = await chooseResearchEngine("auto", k, "a question", signal, fetcher, (s) => steps.push(s), Infinity, avoid);
+    const engine = await chooseResearchEngine("auto", k, request, signal, fetcher, (s) => steps.push(s), Infinity, avoid);
     return { engine, steps };
   };
   let criteria;
@@ -156,11 +210,22 @@ test("a second try leaves out the engine that failed, and Browser Use Cloud is t
   assert.deepEqual(await again(["vision_agent"], jevSeeing("kernel", 0.4)),
     { engine: "browser_use", steps: ["JEV was unsure; using Browser Use Cloud"] });
   assert.deepEqual(criteria, ["browser_use", "kernel"]);
+  assert.deepEqual(await again(["vision_agent"], jevSeeing("kernel", 0.4), keys, deep),
+    { engine: "browser_use", steps: ["JEV was unsure; using Browser Use Cloud"] });
   assert.deepEqual(await again(["vision_agent"], async () => new Response("down", { status: 503 })),
-    { engine: "browser_use", steps: ["JEV was unavailable; using Browser Use Cloud"] });
+    { engine: "browser_use", steps: ["JEV was unavailable (HTTP 503); using Browser Use Cloud"] });
+  // Browser Use Cloud needs no confidence on a second try; a sure answer is kept.
+  assert.deepEqual(await again(["kernel"], jevSeeing("browser_use", 0.3)),
+    { engine: "browser_use", steps: ["JEV selected Browser Use Cloud"] });
+  assert.deepEqual(await again(["kernel"], jevSeeing("vision_agent", 0.9)),
+    { engine: "vision_agent", steps: ["JEV selected Vision agent"] });
   // Without JEV the backup is Browser Use Cloud too.
   assert.equal((await again(["vision_agent"], noJevCall, { ...keys, jev: undefined })).engine, "browser_use");
+  assert.equal((await again(["kernel"], noJevCall, { ...keys, jev: undefined }, deep)).engine, "browser_use");
+  // Without Browser Use Cloud, the untried engine.
+  assert.equal((await again(["kernel"], noJevCall, { ...keys, browserUseKey: "", jev: undefined })).engine, "vision_agent");
   // When every engine was tried, the choice is made as usual; a chosen engine is kept.
-  assert.equal((await again(["vision_agent", "kernel", "browser_use"], noJevCall, { ...keys, jev: undefined })).engine, "vision_agent");
-  assert.equal(await chooseResearchEngine("kernel", keys, "q", signal, noJevCall, undefined, Infinity, ["kernel"]), "kernel");
+  assert.equal((await again(["vision_agent", "kernel", "browser_use"], noJevCall, { ...keys, jev: undefined })).engine, "kernel");
+  assert.equal((await again(["vision_agent", "kernel", "browser_use"], noJevCall, { ...keys, jev: undefined }, deep)).engine, "vision_agent");
+  assert.equal(await chooseResearchEngine("kernel", keys, quick, signal, noJevCall, undefined, Infinity, ["kernel"]), "kernel");
 });
