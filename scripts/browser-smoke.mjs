@@ -1744,7 +1744,10 @@ try {
       const before = await counters();
       await ask(page, "Please research ferns and then stop");
       await page.waitForSelector(".agent-activity", { timeout: 15000 }).catch(() => {});
-      await page.waitForTimeout(3000);
+      // Stop once the Browser Use run exists, so there is a run to cancel.
+      await page.waitForFunction(() => /opened a managed browser/.test(document.querySelector(".agent-activity")?.textContent || ""),
+        null, { timeout: 20000 }).catch(() => {});
+      await page.waitForTimeout(1000);
       check("research job: the words before the research call leave the answer as research starts",
         !(await answerText(page)).join(" ").includes("I'll research that now."));
       await page.getByRole("button", { name: /Stop/ }).click();
