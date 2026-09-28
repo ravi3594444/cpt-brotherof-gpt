@@ -47,11 +47,15 @@ export const ENGINE_MIN_MS: Record<BrowserEngine, number> = { browser_use: 60_00
 export const notEnoughTime = (engine: BrowserEngine) =>
   new ResearchError(`There is not enough time left for ${engine === "vision_agent" ? "the vision agent" : ENGINE_LABELS[engine]} to research this. Try a narrower question.`);
 // What JEV weighs for each engine it may choose.
+// Kernel does most research; Browser Use Cloud only what needs a heavier agent.
 const JEV_CRITERIA: Record<BrowserEngine, string> = {
-  kernel: "Read a public page URL or quickly search and extract a few straightforward public pages.",
-  browser_use: "Navigate complex websites, compare many pages, interact with dynamic pages, or resolve uncertain steps with a browser agent.",
-  vision_agent: "Look at pages to find things: visual or image-heavy pages, products, layouts, charts, or clicking through a site's own menus and search.",
+  vision_agent: "The default for most research: visit sites, search within a site, click through its menus, and look at products, prices, pictures, layouts or charts.",
+  kernel: "Read the links the user gave, or quickly search and read a few straightforward public pages.",
+  browser_use: "Only when the task clearly needs a heavy autonomous browser agent: long multi-step work across many sites, complex filters or forms, or dynamic web apps the other options cannot handle.",
 };
+// The order Auto prefers engines in, and the order for a second try, where Browser Use Cloud is the backup.
+const PREFERENCE: BrowserEngine[] = ["vision_agent", "kernel", "browser_use"];
+const BACKUP: BrowserEngine[] = ["browser_use", "vision_agent", "kernel"];
 const nap = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
     signal.throwIfAborted();
@@ -572,14 +576,17 @@ export async function jevChooseEngine(
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
-  options: BrowserEngine[] = ["browser_use", "kernel"],
+  options: BrowserEngine[] = ["kernel", "browser_use"],
+  /** A second try, after an engine failed: Browser Use Cloud is then the backup. */
+  backup = false,
 ): Promise<BrowserEngine> {
-  // Without a usable answer, prefer the most thorough engine on offer.
-  const safest = (["browser_use", "vision_agent", "kernel"] as const).find((e) => options.includes(e))!;
-  const fallback = (why: string): BrowserEngine => {
-    progress?.(`JEV was ${why}; using ${ENGINE_LABELS[safest]}`);
-    return safest;
+  // Without a usable answer, the preferred engine on offer: Kernel first, or the backup on a second try.
+  const preferred = (backup ? BACKUP : PREFERENCE).find((e) => options.includes(e))!;
+  const pick = (engine: BrowserEngine, why: string): BrowserEngine => {
+    progress?.(`JEV was ${why}; using ${ENGINE_LABELS[engine]}`);
+    return engine;
   };
+  const fallback = (why: string) => pick(preferred, why);
   try {
     const response = await fetcher(service.url, {
       method: "POST",
@@ -590,7 +597,7 @@ export async function jevChooseEngine(
         questions: {
           route: {
             type: "choice",
-            instructions: "Choose the appropriate browser workflow for this user's research question.",
+            instructions: "Choose the browser workflow for this research task. Prefer the Kernel options (vision_agent or kernel); choose browser_use only when the task clearly needs it.",
             criteria: Object.fromEntries(options.map((e) => [e, JEV_CRITERIA[e]])),
           },
         },
@@ -604,8 +611,14 @@ export async function jevChooseEngine(
     const route = body.answers?.route;
     const choice = options.find((e) => e === route?.choice);
     if (!choice) return fallback("unavailable");
-    // Kernel only reads pages; take it only when JEV is sure.
-    if (choice === "kernel" && (route?.confidence || 0) < 0.65) return fallback("unsure");
+    const sure = (route?.confidence || 0) >= 0.65;
+    // Browser Use Cloud costs the most; take it on a first try only when JEV is sure the task needs it.
+    if (choice === "browser_use" && !backup && !sure && preferred !== "browser_use") return fallback("unsure");
+    // Kernel only reads pages; when JEV is unsure, the vision agent browses instead (or the backup).
+    if (choice === "kernel" && !sure) {
+      const instead = backup ? preferred : options.includes("vision_agent") ? "vision_agent" : "kernel";
+      if (instead !== choice) return pick(instead, "unsure");
+    }
     progress?.(`JEV selected ${ENGINE_LABELS[choice]}`);
     return choice;
   } catch {
@@ -736,25 +749,30 @@ export async function chooseResearchEngine(
   progress?: Progress,
   /** Time research has left (ms); Auto leaves out engines that need more. */
   timeLeft = Infinity,
+  /** Engines already tried for this Answer: a second try leaves them out while another is connected. */
+  avoid: readonly string[] = [],
 ): Promise<Exclude<ResearchEngine, "auto">> {
   if (requested !== "auto") {
     progress?.(`Selected ${ENGINE_LABELS[requested]}`);
     return requested;
   }
-  // In order of preference when JEV is not asked.
-  const connected: BrowserEngine[] = [
-    ...(keys.browserUseKey ? ["browser_use" as const] : []),
-    ...(keys.visionAgent ? ["vision_agent" as const] : []),
-    ...(keys.kernelKey ? ["kernel" as const] : []),
-  ];
+  const on: Record<BrowserEngine, boolean> = {
+    vision_agent: !!keys.visionAgent,
+    kernel: !!keys.kernelKey,
+    browser_use: !!keys.browserUseKey,
+  };
+  const untried = BACKUP.filter((e) => on[e] && !avoid.includes(e));
+  const backup = avoid.length > 0 && untried.length > 0;
+  // In order of preference when JEV is not asked: Kernel first, or Browser Use Cloud as the backup.
+  const connected = backup ? untried : PREFERENCE.filter((e) => on[e]);
   // When no engine fits, the chosen one says there is not enough time.
   const fits = connected.filter((e) => timeLeft >= ENGINE_MIN_MS[e]);
   const available = fits.length ? fits : connected;
-  const skipped = connected.filter((e) => !available.includes(e));
+  const skipped = BACKUP.filter((e) => connected.includes(e) && !available.includes(e));
   if (skipped.length) progress?.(`Not enough time is left for ${skipped.map((e) => ENGINE_LABELS[e]).join(" or ")}`);
   // JEV reports its own decision, or why Scout fell back, through progress.
   if (available.length >= 2 && keys.jev)
-    return jevChooseEngine(question, keys.jev, signal, fetcher, progress, available);
+    return jevChooseEngine(question, keys.jev, signal, fetcher, progress, available, backup);
   const engine = available[0] ?? "tavily";
   progress?.(`Selected ${ENGINE_LABELS[engine]}`);
   return engine;

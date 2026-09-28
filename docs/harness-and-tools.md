@@ -56,9 +56,16 @@ Keys are server-side environment variables.
    researches the question and answers from the evidence, or answers
    directly.
 4. When research runs, the server chooses one engine. An explicit selection
-   wins. Auto uses JEV to choose between Kernel and Browser Use Cloud when
-   both and a JEV key (AI/ML API or TypeSafe) are available; low confidence or a JEV failure
-   chooses Browser Use Cloud. With just one browser key, that engine runs.
+   wins. Auto prefers Kernel: the Vision agent for browsing, plain Kernel for
+   reading links, and Browser Use Cloud only for tasks that need a heavier
+   agent. With two or more engines and a JEV key (AI/ML API or TypeSafe), JEV
+   chooses; it is told Kernel is the default. Browser Use Cloud needs JEV's
+   confidence of at least 0.65 and plain Kernel too (below it the Vision agent
+   browses instead); a JEV failure or an unsure answer uses the Vision agent,
+   then Kernel, then Browser Use Cloud, as does Auto without JEV. A second
+   research for the same Answer leaves out the engines already tried, and
+   Browser Use Cloud is then the backup. With just one browser key, that engine
+   runs.
    Auto leaves out an engine that needs more time than research has left
    (Browser Use Cloud 60 seconds, the vision agent 45, Kernel 20), which
    matters for a late retry; each engine also refuses to open a paid browser
@@ -268,7 +275,7 @@ fake product pictures.
 | --- | --- | --- | --- |
 | Browser Use Cloud V4 | `POST https://api.browser-use.com/api/v4/runs` with `task`, `maxCostUsd: 1`, and an output schema for `sources[{url,title,summary,image?}]`; poll `GET /api/v4/runs/{id}/status`, then `GET /api/v4/runs/{id}` once; when it ends without a result, `GET /api/v4/runs/{id}/events?after=` (cursor `nextAfter`, while `hasMore`); cancel `POST /api/v4/runs/{id}/cancel`; stop the browser with `PATCH /api/v4/browsers/{id}` `{"action":"stop"}` (id from `browser.ready`'s `data.browser_session_id`, or `GET /api/v4/browsers?agentSessionId=`) | completed run's structured `output.sources` or parseable `result`; otherwise the pages its events reached | `BROWSER_USE_API_KEY` in `X-Browser-Use-API-Key` |
 | Kernel browser | `POST https://api.onkernel.com/browsers`; `POST /browsers/{id}/playwright/execute` with fixed `code` and `timeout_sec`; `DELETE /browsers/{id}` | Playwright's returned list `[{url,title,content,read,image?}]` | `KERNEL_API_KEY` as Bearer |
-| JEV | `POST https://api.aimlapi.com/v1/decisions` with `model: "typesafe/jev"` (AI/ML API), or `POST https://api.typesafe.ai/v1/systemone` with `model: "jev-latest"` (TypeSafe); both take `state` and a `choice` question between `kernel` and `browser_use` | `answers.route.choice` and `confidence`; Kernel requires confidence at least 0.65 | `AIMLAPI_API_KEY` or `TYPESAFE_API_KEY` as Bearer |
+| JEV | `POST https://api.aimlapi.com/v1/decisions` with `model: "typesafe/jev"` (AI/ML API), or `POST https://api.typesafe.ai/v1/systemone` with `model: "jev-latest"` (TypeSafe); both take `state` and a `choice` question between the connected engines (`vision_agent`, `kernel`, `browser_use`) | `answers.route.choice` and `confidence`; Browser Use Cloud and Kernel require confidence at least 0.65 | `AIMLAPI_API_KEY` or `TYPESAFE_API_KEY` as Bearer |
 | Answer model | OpenAI-compatible Chat Completions via Vercel AI SDK `streamText`, with OpenAI-style tool calling for `web_research` (plain-text RESEARCH/ANSWER fallback otherwise) | the research decision, then answer tokens grounded in validated source list | `MODEL_BASE_URL`, `MODEL_ID`, `MODEL_API_KEY` |
 | Legacy search API | Tavily `search` and `extract` | ranked links and snippets, optionally full page text | `TAVILY_API_KEY` |
 

@@ -23,7 +23,7 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 | Vision model | An optional model that can see, used when the Answer model reads text only: it describes Photos and drives the Vision agent. | image model |
 | Vision agent | A Research engine where the Vision model operates a real Kernel browser step by step and keeps the pages it read as Sources. | Atria agent, browser bot |
 | Search API | Tavily search and page extraction, kept as a compatibility fallback. | Tavily (in UI copy), legacy search |
-| JEV | TypeSafe's hosted choice model, reached through AI/ML API or TypeSafe. In Auto, it picks Kernel or Browser Use Cloud. It never answers or browses. | router model, on-device model |
+| JEV | TypeSafe's hosted choice model, reached through AI/ML API or TypeSafe. In Auto, it picks the Research engine, told that Kernel (the Vision agent or plain Kernel) is the default and Browser Use Cloud only for tasks that need it. It never answers or browses. | router model, on-device model |
 | Source | A validated public web page used as evidence: title, URL, content, and optionally an image. | result, link |
 | Read | True for a Source only when its content is page text a Research engine read directly. Search excerpts and browser-agent summaries are not Read. | verified |
 | Evidence | The Sources given to the Answer model, marked as page content, search excerpt, or agent observation, with the Research engine's warning, such as a Partial result's. | context |
@@ -50,7 +50,7 @@ Scout is a mobile-first research chat. When a question needs the web, it answers
 - When the provider cannot take tools, the **Answer model** makes the same choice as a one-word reply (RESEARCH or ANSWER); an unclear reply means Research.
 - A **Citation** number n refers to the n-th **Source** of the same Answer's Research.
 - An **Answer** can have **Thinking** from before and after the Research tool call; it shows as one row, above the Research panel when the model thought before researching. Thinking is kept on the device, up to 20,000 characters per Answer (older Conversations give theirs up first when the device runs out of room), and never sent back to the **Answer model**.
-- **Auto** asks **JEV** only when Browser Use Cloud, Kernel, and the JEV key are all connected. With one browser connected, Auto uses it. With none, it uses the **Search API**.
+- **Auto** asks **JEV** when two or more Research engines and the JEV key are connected. Without JEV, or when JEV is unsure or fails, it prefers the Vision agent, then Kernel, then Browser Use Cloud. A second try leaves out the engines already tried, with Browser Use Cloud as the backup. With one browser connected, Auto uses it. With none, it uses the **Search API**.
 - **Browser Use Cloud** Sources, including **Partial results**, are never **Read**; **Kernel** page text is Read; **Search API** Sources are Read only after page extraction succeeds.
 
 ## States and lifecycles

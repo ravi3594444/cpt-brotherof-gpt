@@ -285,3 +285,14 @@ test("the route's cleanup hook reaches the engine, and a hook that fails does no
     globalThis.fetch = originalFetch;
   }
 });
+
+test("a second research for the same Answer tries another engine: Browser Use Cloud is the backup", async () => {
+  const steps = [];
+  const progress = { step: (s) => steps.push(s), update: () => {} };
+  const keys = { searchKey: "", browserUseKey: "b", kernelKey: "k" };
+  const down = async () => new Response("down", { status: 500 });
+  const research = webResearch({ keys, engine: "auto", model: undefined, conversation: [], fetcher: down });
+  await assert.rejects(research("q", signal, progress, Date.now() + 200_000));
+  await assert.rejects(research("q again", signal, progress, Date.now() + 200_000));
+  assert.deepEqual(steps.filter((s) => s.startsWith("Selected")), ["Selected Kernel", "Selected Browser Use Cloud"]);
+});
