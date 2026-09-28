@@ -1475,6 +1475,10 @@ try {
       check("  closing the app mid-research: the answer is there when it opens again, exactly once",
         finishedAway && texts.length === 1 && (texts[0].match(/The test research found 2 sources/g) || []).length === 1,
         JSON.stringify(texts).slice(0, 300));
+      await again.locator(".assistant-message .thinking-line").first().click().catch(() => {});
+      const thought = await again.locator(".assistant-message .thinking-text").first().innerText().catch(() => "");
+      check("  the words the model wrote before researching are in Thinking, not in the answer",
+        !texts.join(" ").includes("I'll research that now.") && thought.includes("I'll research that now."), thought.slice(0, 200));
       // The job's last chunks (research complete, then finish) can come in the next response window.
       check("  its research panel says Research complete with the job's sources",
         await again.waitForFunction(() => /Research complete/.test(document.querySelector(".agent-activity")?.textContent || ""),
@@ -1514,6 +1518,8 @@ try {
       await ask(page, "Please research ferns and then stop");
       await page.waitForSelector(".agent-activity", { timeout: 15000 }).catch(() => {});
       await page.waitForTimeout(3000);
+      check("research job: the words before the research call leave the answer as research starts",
+        !(await answerText(page)).join(" ").includes("I'll research that now."));
       await page.getByRole("button", { name: /Stop/ }).click();
       await page.waitForTimeout(4000);
       const after = await counters();

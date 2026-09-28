@@ -19,8 +19,8 @@ import {
 } from "../lib/cloud-research.ts";
 import { answerErrorMessage } from "../lib/conversation.ts";
 import { stepWriter, watchRun, type Chunk } from "../lib/job-stream.ts";
-import { answerModel, jobTiming, researchServices, type ResearchJobInput } from "../lib/research-job.ts";
-import { ResearchError } from "../lib/research.ts";
+import { answerModel, jobTiming, researchServices, writerModel, type ResearchJobInput } from "../lib/research-job.ts";
+import { ResearchError, researchTask, type ResearchTask } from "../lib/research.ts";
 import { serverConfig } from "../lib/server-config.ts";
 import {
   closeVisionBrowser,
@@ -72,7 +72,7 @@ export async function openJob(input: ResearchJobInput): Promise<{ state: AnswerS
     c.writer.write({ type: "start", messageId: input.messageId, messageMetadata: { demo: false, job: { id: c.runId } } });
     for (const chunk of input.prefix) c.writer.write(chunk);
     const { keys, fetcher } = c.services;
-    const engine = await chooseEngine(input.handoff.task, input.engine, keys, c.signal, fetcher, researchProgress(state, c.writer));
+    const engine = await chooseEngine(researchTask(input.handoff), input.engine, keys, c.signal, fetcher, researchProgress(state, c.writer));
     return { state, engine };
   } catch {
     // Only a stopped job gets here: choosing falls back on its own.
@@ -84,7 +84,7 @@ export async function openJob(input: ResearchJobInput): Promise<{ state: AnswerS
 openJob.maxRetries = 1;
 
 /** Chooses the engine again for a second research attempt; Auto tries an engine not `tried` yet. */
-export async function chooseAgain(input: ResearchJobInput, state: AnswerState, task: string, tried: string[]): Promise<{ state: AnswerState; engine: Engine }> {
+export async function chooseAgain(input: ResearchJobInput, state: AnswerState, task: ResearchTask, tried: string[]): Promise<{ state: AnswerState; engine: Engine }> {
   "use step";
   const c = stepContext("none");
   try {
@@ -101,7 +101,7 @@ export async function chooseAgain(input: ResearchJobInput, state: AnswerState, t
 export async function startBrowserUse(
   input: ResearchJobInput,
   state: AnswerState,
-  task: string,
+  task: ResearchTask,
 ): Promise<Researched | { state: AnswerState; run: BrowserUseRun }> {
   "use step";
   const c = stepContext("none");
@@ -150,7 +150,7 @@ export async function pollBrowserUse(
 pollBrowserUse.maxRetries = 1;
 
 /** Kernel's fixed page-reading script, in one step; its browser deletes itself if the step dies. */
-export async function kernelStep(input: ResearchJobInput, state: AnswerState, task: string): Promise<Researched> {
+export async function kernelStep(input: ResearchJobInput, state: AnswerState, task: ResearchTask): Promise<Researched> {
   "use step";
   const c = stepContext("none");
   try {
@@ -169,7 +169,7 @@ export async function kernelStep(input: ResearchJobInput, state: AnswerState, ta
 kernelStep.maxRetries = 1;
 
 /** The Search API, in one step. */
-export async function searchStep(input: ResearchJobInput, state: AnswerState, task: string): Promise<Researched> {
+export async function searchStep(input: ResearchJobInput, state: AnswerState, task: ResearchTask): Promise<Researched> {
   "use step";
   const c = stepContext("none");
   try {
@@ -188,7 +188,7 @@ searchStep.maxRetries = 1;
 export async function openVision(
   input: ResearchJobInput,
   state: AnswerState,
-  task: string,
+  task: ResearchTask,
 ): Promise<Researched | { state: AnswerState; agent: VisionAgentState }> {
   "use step";
   const c = stepContext("none");
@@ -236,8 +236,9 @@ export async function closeVision(browserId: string): Promise<void> {
 closeVision.maxRetries = 2;
 
 /**
- * The answer step, with fresh time: the Answer model gets the research result and writes the Answer,
- * ending the stream. When it may try again and calls the Research tool, this returns that call.
+ * The answer step, with fresh time: the research writer (the vision model, or else the Answer model)
+ * gets the research result and writes the Answer, ending the stream. When research may be tried
+ * again, the Answer model decides; if it calls the Research tool, this returns that call.
  */
 export async function answerStep(
   input: ResearchJobInput,
@@ -252,6 +253,7 @@ export async function answerStep(
     const next = await continueAnswer({
       ...turn,
       model: answerModel(c.config),
+      researchWriter: writerModel(c.config),
       messages: input.messages,
       writer: c.writer,
       modelName: input.modelName,

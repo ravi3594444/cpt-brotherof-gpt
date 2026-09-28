@@ -9,7 +9,7 @@ import {
   type ResearchEngine,
 } from "./cloud-research.ts";
 import { textOnlyMessages } from "./conversation.ts";
-import { extractPublicUrls, readPages, ResearchError, searchWeb } from "./research.ts";
+import { extractPublicUrls, readPages, ResearchError, researchTask, searchWeb, type ResearchInput } from "./research.ts";
 import { visionAgentResearch } from "./vision-agent.ts";
 import type { VisionService } from "./vision.ts";
 
@@ -27,7 +27,7 @@ export type Keys = {
  * the choice. `timeLeft` leaves out engines that need more time; a Research job has no limit.
  */
 export async function chooseEngine(
-  task: string,
+  task: ResearchInput,
   engine: ResearchEngine,
   keys: Keys,
   signal: AbortSignal,
@@ -77,7 +77,8 @@ export function webResearch({ keys, engine, model, conversation, keepAlive, fetc
   };
   // A second research for the same Answer tries another engine.
   const tried: string[] = [];
-  return async (task, request, progress, deadline) => {
+  return async (input, request, progress, deadline) => {
+    const task = researchTask(input);
     const services = fetcher ?? fetch;
     // Engines end by the deadline themselves; this stops any request still waiting just after it.
     const signal = AbortSignal.any([request, AbortSignal.timeout(Math.max(0, deadline - Date.now()) + 5000)]);
@@ -102,13 +103,14 @@ export function webResearch({ keys, engine, model, conversation, keepAlive, fetc
 
 /** Search API research: planned queries, then the pages read with extraction. */
 export async function searchApiResearch(
-  task: string,
+  input: ResearchInput,
   key: string,
   model: LanguageModel,
   conversation: ModelMessage[],
   signal: AbortSignal,
   progress: ResearchProgress,
 ): Promise<{ sources: ResearchSource[]; warning?: string }> {
+  const { task, query } = researchTask(input);
   progress.step("Search API is finding source pages");
   const urls = extractPublicUrls(task).slice(0, 4);
   if (urls.length) {
@@ -123,7 +125,7 @@ export async function searchApiResearch(
   }
   // Plain text planning works with providers that do not support tool calling or JSON mode.
   progress.step("Planning search queries");
-  let queries = [task.slice(0, 400)];
+  let queries = [query];
   try {
     const recent = textOnlyMessages(conversation.slice(-6))
       .map((m) => `${m.role === "user" ? "User" : "Scout"}: ${m.content}`)

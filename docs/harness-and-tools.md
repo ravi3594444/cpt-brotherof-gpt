@@ -17,14 +17,30 @@ Keys are server-side environment variables.
    streams directly from the connected model, with no tools, without claiming
    web verification.
 3. With Search the web on, the answer model decides whether to research. It
-   gets one tool, `web_research({ task })`, with `toolChoice: "auto"`. The task
-   is 1 to 2000 characters: a self-contained research task in the user's
-   language, with any links the user gave. The model calls it when the user
+   gets one tool, `web_research({ task, query?, depth? })`, with
+   `toolChoice: "auto"`. The task is 1 to 2000 characters: a self-contained
+   research task in the user's language, with any links the user gave. The
+   query is a short web search (at most about 10 words, in the language that
+   suits the task) that the engines start with; without one, Scout uses the
+   task's first 12 words, and a query is cut to 16 words. The depth is
+   `"quick"` (the default: a few pages are enough) or `"deep"` (only when the
+   user asks for thorough, comprehensive or detailed research, or for many
+   sources or sites); `"deep"` in any case counts, anything else means quick.
+   A query that is null or not text, or another depth, never rejects the call:
+   research still runs, with these fallbacks. The model calls it when the user
    asks it to research, search, find, look up, compare or check something, or
    when a good answer needs current or verifiable facts; otherwise it answers
    directly and the stream has no research parts. Scout adds no rules of its
-   own to that decision. Research runs once per message, with one retry at
-   most. If it fails (or finds no sources), the model gets
+   own to that decision. Words the model writes in a step that ends in a
+   research call (before research, or before a retry) are narration, not the
+   answer: they stream as text, and when the call starts (`tool-input-start`
+   or `tool-call`) Scout sends `reset-step` and streams the Answer's parts
+   again with those words as a reasoning part, so they show in Thinking and
+   the answer holds only what was written after research. A Research job's
+   first step re-sends the compacted version, and its answer step does the
+   same for a retry's narration. A direct answer is never held back.
+   Research runs once per message, with one retry at most. If it fails (or
+   finds no sources), the model gets
    `{ error, canRetry, secondsLeft, retry }`: why it failed, the seconds left
    before the 280-second ceiling, and whether it may call the tool once more.
    It may only when at least 90 seconds remain and the failure would not
@@ -56,25 +72,42 @@ Keys are server-side environment variables.
    researches the question and answers from the evidence, or answers
    directly.
 4. When research runs, the server chooses one engine. An explicit selection
-   wins. Auto prefers Kernel: the Vision agent for browsing, plain Kernel for
-   reading links, and Browser Use Cloud only for tasks that need a heavier
-   agent. With two or more engines and a JEV key (AI/ML API or TypeSafe), JEV
-   chooses; it is told Kernel is the default. Browser Use Cloud needs JEV's
-   confidence of at least 0.65 and plain Kernel too (below it the Vision agent
-   browses instead); a JEV failure or an unsure answer uses the Vision agent,
-   then Kernel, then Browser Use Cloud, as does Auto without JEV. A second
-   research for the same Answer leaves out the engines already tried, and
-   Browser Use Cloud is then the backup. With just one browser key, that engine
-   runs.
+   wins. Auto prefers Kernel: plain Kernel, the default and the fastest, for
+   questions a few pages answer (facts, explanations, how things work, news,
+   reviews, comparisons from articles, pasted links); the Vision agent for
+   tasks that need using a site like a person (searching inside a site,
+   filters, menus, product listings and prices, pictures, layouts, charts); and
+   Browser Use Cloud only for tasks that clearly need a heavy autonomous agent.
+   With two or more engines and a JEV key (AI/ML API or TypeSafe), JEV chooses;
+   its `state` is the task and the research depth, and its criteria say the
+   above. Browser Use Cloud needs JEV's confidence of at least 0.65 on a first
+   try. An unsure plain Kernel answer stays Kernel for quick research and
+   becomes the Vision agent for deep. Without a usable JEV answer, and without
+   JEV, Auto uses the depth's order: Kernel, the Vision agent, then Browser Use
+   Cloud for quick research; the Vision agent, Kernel, then Browser Use Cloud
+   for deep. When JEV gives no usable answer, the step says why: "JEV was
+   unavailable (HTTP 402); using Kernel", "(timed out)" after 4.5 seconds,
+   "(network error)", or "(unexpected answer)", and `console.warn` logs the
+   status and the first 300 characters of the response, never the key (it is
+   taken out of the whole response before the cut). A
+   second research for the same Answer leaves out the engines already tried,
+   and Browser Use Cloud is then the backup (without confidence gates). With
+   just one browser key, that engine runs.
    Auto leaves out an engine that needs more time than research has left
    (Browser Use Cloud 60 seconds, the vision agent 45, Kernel 20), which
    matters for a late retry; each engine also refuses to open a paid browser
    with less than its minimum, including when chosen explicitly.
    The older Tavily adapter remains available as a compatibility fallback.
-5. Browser Use Cloud runs its own browser agent. Kernel creates an entirely
-   separate cloud browser and executes a fixed Playwright snippet for public
-   search/page reading. The code never sends model-generated JavaScript to
-   Kernel.
+5. Browser Use Cloud runs its own browser agent; its task is the research
+   task with one line for the depth ("Finish after a few relevant pages." or
+   "Be thorough: visit many relevant pages from different sources before you
+   finish."). Kernel creates an entirely separate cloud browser and executes a
+   fixed Playwright snippet: it searches Google, then Bing, for the query (or
+   opens the first pasted link), and reads up to four result pages side by
+   side, each in its own tab with its own 20-second limit (`Promise.allSettled`),
+   so four pages take about as long as the slowest one. A page that fails or
+   leaves the public web while it is read is left out. The code never sends
+   model-generated JavaScript to Kernel.
 6. The server validates public source URLs, keeps up to six Browser Use
    sources or four Kernel pages, and returns the observed evidence to the
    answer model, numbered in order, as the tool result (in the plain-text
@@ -116,6 +149,26 @@ Keys are server-side environment variables.
    browser with less than 45 seconds. Requests stop on
    client cancellation.
 
+With a vision model connected, the **research writer** writes the answer
+after research instead of the answer model, which is a slow reasoning model in
+the private preview: in the request (the step after `web_research` returns, the
+answer model's loop stops before its answer step), in a Research job's answer
+step, and in the plain-text fallback's evidence path. It is the vision service
+(`VISION_MODEL_ID`, its base URL and key) through `@ai-sdk/openai-compatible`,
+with the same system prompt (citations, untrusted evidence, no false promises),
+the same messages (the conversation, then the tool call and its result, or the
+evidence prompt) without the answer model's reasoning parts, the Research tool
+defined with `toolChoice: "none"`, and 6,000 output tokens (4,096 for a model
+that turns that away). Its reasoning streams as Thinking. The research steps
+say "<writer> is writing the answer from the sources" (the name comes from the
+model id, such as "Some Model 2.1"), and message metadata `writer` names it. If
+it fails before its first word, or writes nothing, the step "<writer> could not
+write the answer, so <answer model> is writing it" follows and the answer model
+writes the answer once. The answer model still writes direct answers, decides
+whether to research, and decides whether to retry a failed research; after a
+failure that cannot be retried, the writer explains it. `RESEARCH_WRITER=answer`
+keeps the answer model as the writer; test mode never uses one.
+
 Research steps are an **observable workflow**, not the model's reasoning.
 Displayed steps are actions the server actually took, such as selecting a
 browser, opening a session, visiting pages, and collecting sources.
@@ -145,15 +198,20 @@ first pass does; when it calls `web_research`, the route starts a Research job
 task, the engine setting, the text-only conversation, the tool call, and the
 chunks already streamed, which the job writes again first so a replay from the
 start rebuilds the whole message. The route then pipes the job's stream into the
-same response and sends the job id as a `data-job` part.
+same response and sends the job id as a `data-job` part. The task travels with
+its query and depth.
 
 The job has no time limit. Browser Use is created once (no retries, so a retry
 never starts a second paid run) and then polled in windows of 240 seconds, one
 workflow step each, until it completes, fails, reaches `RESEARCH_MAX_COST_USD`,
 or passes 60 windows. The Vision agent runs in batches of up to 240 seconds, up
-to 60 steps, and its browser is closed in every case. Kernel and the Search API
-are one step each. The answer is its own step, with the tool defined and
-`toolChoice: "none"`. A retried step first writes `reset-step`, so its chunks do
+to 10 steps for quick research and 40 for deep, and its browser is closed in
+every case. A turn starts only while 140 seconds of its batch are left (a model
+reply and its shorter ask again, 45 seconds each, then a 50-second browser
+step), so a batch ends inside its window. Kernel and the Search API
+are one step each. The answer is its own step, written by the research writer
+(or the answer model) with the tool defined and `toolChoice: "none"`; after a
+failure that may be retried, the answer model decides first. A retried step first writes `reset-step`, so its chunks do
 not show twice.
 
 A response carries the job's stream for at most 280 seconds; the client reads on
@@ -214,14 +272,27 @@ type ChatRequest = {
 ```
 
 Vision agent: with `KERNEL_API_KEY` and a vision model (`VISION_MODEL_ID`), the
-`vision_agent` engine opens a Kernel browser and runs up to 8 steps within 200
-seconds, or until the research deadline if that is sooner. Each step Scout sends the vision model the page's address, a numbered
+`vision_agent` engine opens a Kernel browser on a Bing search for the query (or
+the first pasted link) and runs up to 8 steps (16 for deep research) within 200
+seconds, or until the research deadline if that is sooner; in a Research job,
+10 steps (40 for deep). Each step Scout sends the vision model the page's address, a numbered
 list of its visible clickable elements and text fields, the start of its text,
-and a JPEG screenshot; the model replies with one JSON action (`open`, `click`,
+and a JPEG screenshot, with the question, the query, the depth and how many
+pages to keep; the model replies, with up to 1,200 tokens so it can think
+first, with one JSON action (`open`, `click`,
 `type`, `scroll`, `back`, `read`, `finish`). Scout checks it (only listed
 elements, typing only into text or search boxes, only public addresses) and
 runs it with fixed Playwright code. Pages it `read`s become sources with
-`read: true` for the answer model. The route's ceiling is 280 seconds and
+`read: true` for the answer model. It finishes by itself once it has kept 3
+pages (6 for deep). An empty or unusable reply is asked once more in the same
+step with a shorter prompt (the last five actions, less page text); a second
+empty reply ends the run with the pages kept and the warning "The vision model
+stopped replying; these are the pages it had read", and fails only when it kept
+none. A vision model error (such as HTTP 503 or 429, or a reply that times out)
+or a browser step Kernel could not carry out ends the run the same way once it
+has kept a page, or is on a readable one: the warning says "The vision agent
+stopped early after an error" and why. With nothing to keep, or when the run is
+stopped or out of research time, the run fails with the error. The route's ceiling is 280 seconds and
 `maxDuration` is 300, Vercel's default limit.
 
 Photos: a question can carry up to four photos. The browser shrinks each to
@@ -259,7 +330,8 @@ type ResearchData = {
   demo: boolean;
 };
 // Stream parts: data-research, source-url, reasoning-start/delta/end,
-// message-metadata ({ thinkingMs }), text-start/delta/end, finish.
+// message-metadata ({ thinkingMs, writer }), text-start/delta/end, reset-step
+// (narration taken back; the Answer's parts follow again), finish.
 // data-research and source-url appear only when the answer model researched.
 ```
 
@@ -275,8 +347,9 @@ fake product pictures.
 | --- | --- | --- | --- |
 | Browser Use Cloud V4 | `POST https://api.browser-use.com/api/v4/runs` with `task`, `maxCostUsd: 1`, and an output schema for `sources[{url,title,summary,image?}]`; poll `GET /api/v4/runs/{id}/status`, then `GET /api/v4/runs/{id}` once; when it ends without a result, `GET /api/v4/runs/{id}/events?after=` (cursor `nextAfter`, while `hasMore`); cancel `POST /api/v4/runs/{id}/cancel`; stop the browser with `PATCH /api/v4/browsers/{id}` `{"action":"stop"}` (id from `browser.ready`'s `data.browser_session_id`, or `GET /api/v4/browsers?agentSessionId=`) | completed run's structured `output.sources` or parseable `result`; otherwise the pages its events reached | `BROWSER_USE_API_KEY` in `X-Browser-Use-API-Key` |
 | Kernel browser | `POST https://api.onkernel.com/browsers`; `POST /browsers/{id}/playwright/execute` with fixed `code` and `timeout_sec`; `DELETE /browsers/{id}` | Playwright's returned list `[{url,title,content,read,image?}]` | `KERNEL_API_KEY` as Bearer |
-| JEV | `POST https://api.aimlapi.com/v1/decisions` with `model: "typesafe/jev"` (AI/ML API), or `POST https://api.typesafe.ai/v1/systemone` with `model: "jev-latest"` (TypeSafe); both take `state` and a `choice` question between the connected engines (`vision_agent`, `kernel`, `browser_use`) | `answers.route.choice` and `confidence`; Browser Use Cloud and Kernel require confidence at least 0.65 | `AIMLAPI_API_KEY` or `TYPESAFE_API_KEY` as Bearer |
-| Answer model | OpenAI-compatible Chat Completions via Vercel AI SDK `streamText`, with OpenAI-style tool calling for `web_research` (plain-text RESEARCH/ANSWER fallback otherwise) | the research decision, then answer tokens grounded in validated source list | `MODEL_BASE_URL`, `MODEL_ID`, `MODEL_API_KEY` |
+| JEV | `POST https://api.aimlapi.com/v1/decisions` with `model: "typesafe/jev"` (AI/ML API), or `POST https://api.typesafe.ai/v1/systemone` with `model: "jev-latest"` (TypeSafe); both take `state` and a `choice` question between the connected engines (`vision_agent`, `kernel`, `browser_use`) | `answers.route.choice` and `confidence`; Browser Use Cloud needs at least 0.65 on a first try, and an unsure Kernel becomes the Vision agent for deep research | `AIMLAPI_API_KEY` or `TYPESAFE_API_KEY` as Bearer |
+| Answer model | OpenAI-compatible Chat Completions via Vercel AI SDK `streamText`, with OpenAI-style tool calling for `web_research` (plain-text RESEARCH/ANSWER fallback otherwise) | the research decision, direct answers, and answer tokens grounded in validated source list when there is no research writer | `MODEL_BASE_URL`, `MODEL_ID`, `MODEL_API_KEY` |
+| Research writer | The vision model's OpenAI-compatible Chat Completions via `@ai-sdk/openai-compatible` `streamText`, 6,000 output tokens | answer tokens (and reasoning) grounded in validated source list, after research | `VISION_MODEL_ID`, `VISION_MODEL_BASE_URL`, `VISION_MODEL_API_KEY` or `AIMLAPI_API_KEY`; `RESEARCH_WRITER=answer` turns it off |
 | Legacy search API | Tavily `search` and `extract` | ranked links and snippets, optionally full page text | `TAVILY_API_KEY` |
 
 The Browser Use agent is a hosted browser **and** an agent. Kernel is its own

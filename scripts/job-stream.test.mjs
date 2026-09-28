@@ -84,6 +84,35 @@ test("a failed write surfaces when the step flushes, not as an unhandled rejecti
   await assert.rejects(writer.release(), /stream gone/);
 });
 
+test("a reset in the start of an answer drops what came before it, so the job re-sends only what the app ended with", () => {
+  const research = (steps) => ({ type: "data-research", id: "research", data: { steps } });
+  const compacted = compactChunks([
+    { type: "text-start", id: "answer" },
+    { type: "text-delta", id: "answer", delta: "I'll research that." },
+    research(["one"]),
+    { type: "reset-step" },
+    { type: "reasoning-start", id: "thinking-1" },
+    { type: "reasoning-delta", id: "thinking-1", delta: "I'll research that." },
+    research(["one"]),
+    { type: "reasoning-end", id: "thinking-1" },
+    research(["one", "two"]),
+  ]);
+  assert.deepEqual(compacted, [
+    { type: "reasoning-start", id: "thinking-1" },
+    { type: "reasoning-delta", id: "thinking-1", delta: "I'll research that." },
+    research(["one", "two"]),
+    { type: "reasoning-end", id: "thinking-1" },
+  ]);
+  // A reset takes back only its own step.
+  assert.deepEqual(compactChunks([
+    research(["one"]),
+    { type: "start-step" },
+    { type: "text-start", id: "a" },
+    { type: "reset-step" },
+    { type: "text-start", id: "b" },
+  ]), [research(["one"]), { type: "start-step" }, { type: "text-start", id: "b" }]);
+});
+
 test("the start of an answer is compacted before a job re-sends it", () => {
   const research = (steps) => ({ type: "data-research", id: "research", data: { steps } });
   assert.deepEqual(compactChunks([

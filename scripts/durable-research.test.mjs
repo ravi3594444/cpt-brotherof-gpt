@@ -5,7 +5,7 @@ import {
   createBrowserUseRun,
   pollBrowserUseWindow,
 } from "../lib/cloud-research.ts";
-import { ResearchError } from "../lib/research.ts";
+import { ResearchError, researchTask } from "../lib/research.ts";
 import { newVisionAgent, openVisionBrowser, visionAgentBatch } from "../lib/vision-agent.ts";
 
 // A Research job's Browser Use run: created once, then polled in windows with no time limit.
@@ -165,8 +165,9 @@ test("a Research job's run is created with the configured cost cap", async () =>
   assert.equal(JSON.parse(cloud.calls[0].body).maxCostUsd, 5);
 });
 
-// A fake Kernel browser plus vision model; each vision model reply takes 20 s on the clock.
-function fakeVision(pages, replies) {
+// A fake Kernel browser plus vision model; each vision model reply takes 20 s on the clock, and each
+// browser action `actionMs`. A null page is a step Kernel could not carry out; a number reply, an HTTP status.
+function fakeVision(pages, replies, { replyMs = 20_000, actionMs = 0 } = {}) {
   let now = 0;
   const calls = { kernel: [], vision: [], deleted: 0, created: [] };
   let p = 0;
@@ -181,12 +182,17 @@ function fakeVision(pages, replies) {
         calls.created.push(JSON.parse(init.body));
         return Response.json({ session_id: "session-12345678" });
       }
-      calls.kernel.push(JSON.parse(init.body).code);
-      return Response.json({ success: true, result: pages[Math.min(p++, pages.length - 1)] });
+      const code = JSON.parse(init.body).code;
+      calls.kernel.push(code);
+      if (!code.includes("const action = null;")) now += actionMs;
+      const next = pages[Math.min(p++, pages.length - 1)];
+      return Response.json(next === null ? { success: false } : { success: true, result: next });
     }
-    now += 20_000;
+    now += replyMs;
     calls.vision.push(JSON.parse(init.body));
-    return Response.json({ choices: [{ message: { content: replies[Math.min(r++, replies.length - 1)] } }] });
+    const reply = replies[Math.min(r++, replies.length - 1)];
+    if (typeof reply === "number") return new Response("busy", { status: reply });
+    return Response.json({ choices: [{ message: { content: reply } }] });
   };
   return { fetcher, calls, clock: () => now };
 }
@@ -209,7 +215,7 @@ test("a Research job's vision agent opens its browser with a Kernel timeout as a
 test("a Research job's vision agent takes its turns in batches that fit a step, with plain state and no screenshots", async () => {
   const scrolls = Array.from({ length: 9 }, () => '{"action":"scroll","direction":"down"}');
   const services = fakeVision([article], [...scrolls, '{"action":"read"}', '{"action":"finish"}']);
-  let agent = newVisionAgent("session-12345678", "How do I grow ferns?");
+  let agent = newVisionAgent("session-12345678", researchTask({ task: "How do I grow ferns?", depth: "deep" }));
   const steps = [];
   const batches = [];
   for (;;) {
@@ -224,8 +230,8 @@ test("a Research job's vision agent takes its turns in batches that fit a step, 
       break;
     }
   }
-  // A turn starts only while more than 100 s of the 240 s window are left: 7 turns 20 s apart.
-  assert.deepEqual(batches, [7, 11]);
+  // A turn starts only while more than 140 s of the 240 s window are left: 5 turns 20 s apart.
+  assert.deepEqual(batches, [5, 10, 11]);
   assert.match(services.calls.kernel[0], /bing\.com\/search/);
   assert.ok(services.calls.kernel.some((code) => code.includes('const start = "";\nconst action = null;')),
     "a later batch looks at the page again before its first turn");
@@ -233,15 +239,27 @@ test("a Research job's vision agent takes its turns in batches that fit a step, 
   assert.ok(steps.includes("Read “How to grow ferns”"));
 });
 
-test("a Research job's vision agent may take up to 60 turns", async () => {
-  const services = fakeVision([article], ['{"action":"scroll","direction":"down"}']);
-  const batch = await visionAgentBatch(newVisionAgent("session-12345678", "Q?"), keys, signal,
-    services.fetcher, undefined, { until: Infinity, clock: services.clock });
-  assert.equal(batch.done, true);
-  assert.equal(batch.agent.turns, 60);
-  assert.equal(services.calls.vision.length, 60);
-  assert.match(batch.result.warning, /step limit/);
-  assert.equal(batch.result.sources[0].url, "https://example.com/ferns");
+test("a Research job's vision agent may take up to 10 turns for quick research and 40 for deep", async () => {
+  for (const [depth, turns] of [["quick", 10], ["deep", 40]]) {
+    const services = fakeVision([article], ['{"action":"scroll","direction":"down"}']);
+    const batch = await visionAgentBatch(newVisionAgent("session-12345678", researchTask({ task: "Q?", depth })), keys, signal,
+      services.fetcher, undefined, { until: Infinity, clock: services.clock });
+    assert.equal(batch.done, true);
+    assert.equal(batch.agent.turns, turns, depth);
+    assert.equal(services.calls.vision.length, turns);
+    assert.match(batch.result.warning, /step limit/);
+    assert.equal(batch.result.sources[0].url, "https://example.com/ferns");
+  }
+});
+
+test("a Research job's vision agent keeps its query and depth as plain data, and starts with the query", async () => {
+  const agent = newVisionAgent("session-12345678", researchTask({ task: "A long sentence about growing ferns", query: "fern care", depth: "deep" }));
+  assert.equal(agent.query, "fern care");
+  assert.equal(agent.depth, "deep");
+  assert.deepEqual(structuredClone(agent), agent);
+  const services = fakeVision([article], ['{"action":"finish"}']);
+  await visionAgentBatch(agent, keys, signal, services.fetcher, undefined, { until: Infinity, clock: services.clock });
+  assert.match(services.calls.kernel[0], /bing\.com\/search\?q=fern%20care"/);
 });
 
 test("a stopped job closes the vision agent's browser in the batch it stopped", async () => {
@@ -251,4 +269,52 @@ test("a stopped job closes the vision agent's browser in the batch it stopped", 
   await assert.rejects(visionAgentBatch({ ...newVisionAgent("session-12345678", "Q?"), started: true }, keys,
     controller.signal, services.fetcher, undefined, { until: Infinity, clock: services.clock }), { name: "AbortError" });
   assert.equal(services.calls.deleted, 1);
+});
+
+test("a Research job's vision agent ends with the pages it kept when the vision model or a browser step fails", async () => {
+  const cases = [
+    [fakeVision([article], ['{"action":"read"}', 503]), /HTTP 503/],
+    [fakeVision([article, null], ['{"action":"read"}', '{"action":"click","element":1}']), /could not carry out that step/],
+  ];
+  for (const [services, why] of cases) {
+    const batch = await visionAgentBatch(newVisionAgent("session-12345678", "How do I grow ferns?"), keys, signal,
+      services.fetcher, undefined, { until: Infinity, clock: services.clock });
+    assert.equal(batch.done, true);
+    assert.deepEqual(batch.result.sources.map((s) => s.url), ["https://example.com/ferns"]);
+    assert.match(batch.result.warning, /stopped early after an error/);
+    assert.match(batch.result.warning, why);
+    assert.equal(services.calls.deleted, 0, "the job closes the browser after the last batch");
+  }
+});
+
+test("a later batch whose first look at the page fails keeps the pages the earlier batches read", async () => {
+  const first = fakeVision([article], ['{"action":"read"}', '{"action":"scroll","direction":"down"}']);
+  const before = await visionAgentBatch(newVisionAgent("session-12345678", "How do I grow ferns?"), keys, signal,
+    first.fetcher, undefined, { until: 150_000, clock: first.clock });
+  assert.equal(before.done, false);
+  assert.equal(before.agent.kept.length, 1);
+  const later = fakeVision([null], ['{"action":"finish"}']);
+  const batch = await visionAgentBatch(before.agent, keys, signal, later.fetcher, undefined, { until: Infinity, clock: later.clock });
+  assert.equal(batch.done, true);
+  assert.deepEqual(batch.result.sources.map((s) => s.url), ["https://example.com/ferns"]);
+  assert.match(batch.result.warning, /stopped early after an error/);
+  assert.equal(later.calls.vision.length, 0);
+});
+
+test("a Research job's vision agent with nothing kept still fails with the cause", async () => {
+  const services = fakeVision([{ ...article, url: "https://www.bing.com/search?q=ferns" }], [402]);
+  await assert.rejects(visionAgentBatch(newVisionAgent("session-12345678", "Q?"), keys, signal, services.fetcher, undefined,
+    { until: Infinity, clock: services.clock }), (error) => error instanceof ResearchError && /insufficient credit/.test(error.message));
+});
+
+test("a batch never runs past its window, even when a turn asks the vision model twice and then steps", async () => {
+  // The slowest turn: an unusable reply and the shorter ask again, 45 s each, then a 50 s browser step.
+  const replies = ['{"action":"read"}', '{"action":"read"}', '{"action":"read"}',
+    ...Array.from({ length: 6 }, (_, i) => (i % 2 ? '{"action":"scroll","direction":"down"}' : "Let me think."))];
+  const services = fakeVision([article], replies, { replyMs: 45_000, actionMs: 50_000 });
+  const until = services.clock() + 240_000;
+  const batch = await visionAgentBatch(newVisionAgent("session-12345678", "Q?"), keys, signal, services.fetcher, undefined,
+    { until, clock: services.clock });
+  assert.equal(batch.done, false);
+  assert.ok(services.clock() <= until, `the batch ended ${services.clock() - until} ms past its window`);
 });

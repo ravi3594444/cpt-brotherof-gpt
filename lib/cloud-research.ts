@@ -1,5 +1,14 @@
 import type { ResearchSource } from "./chat-types";
-import { extractPublicUrls, isSearchPage, publicUrl, repeats, ResearchError } from "./research.ts";
+import {
+  extractPublicUrls,
+  isSearchPage,
+  publicUrl,
+  repeats,
+  ResearchError,
+  researchTask,
+  type ResearchDepth,
+  type ResearchInput,
+} from "./research.ts";
 
 export type BrowserEngine = "browser_use" | "kernel" | "vision_agent";
 export type ResearchEngine = "auto" | BrowserEngine | "tavily";
@@ -47,15 +56,19 @@ export const ENGINE_MIN_MS: Record<BrowserEngine, number> = { browser_use: 60_00
 export const notEnoughTime = (engine: BrowserEngine) =>
   new ResearchError(`There is not enough time left for ${engine === "vision_agent" ? "the vision agent" : ENGINE_LABELS[engine]} to research this. Try a narrower question.`);
 // What JEV weighs for each engine it may choose.
-// Kernel does most research; Browser Use Cloud only what needs a heavier agent.
+// Plain Kernel does most research; Browser Use Cloud only what needs a heavier agent.
 const JEV_CRITERIA: Record<BrowserEngine, string> = {
-  vision_agent: "The default for most research: visit sites, search within a site, click through its menus, and look at products, prices, pictures, layouts or charts.",
-  kernel: "Read the links the user gave, or quickly search and read a few straightforward public pages.",
-  browser_use: "Only when the task clearly needs a heavy autonomous browser agent: long multi-step work across many sites, complex filters or forms, or dynamic web apps the other options cannot handle.",
+  kernel: "The default, and the fastest: questions answered by reading a few public pages, such as facts, explanations, how things work, news, reviews, or comparisons from articles, and the links the user gave.",
+  vision_agent: "Tasks that need using a site like a person: searching inside a site, filters, menus, product listings and prices, pictures, layouts or charts.",
+  browser_use: "Only when the task clearly needs a heavy autonomous browser agent: long multi-step work across many sites, complex forms, or dynamic web apps the other options cannot handle.",
 };
-// The order Auto prefers engines in, and the order for a second try, where Browser Use Cloud is the backup.
-const PREFERENCE: BrowserEngine[] = ["vision_agent", "kernel", "browser_use"];
-const BACKUP: BrowserEngine[] = ["browser_use", "vision_agent", "kernel"];
+// The order Auto prefers engines in for each depth, and for a second try, where Browser Use Cloud is the backup.
+const PREFERENCE: Record<ResearchDepth, BrowserEngine[]> = {
+  quick: ["kernel", "vision_agent", "browser_use"],
+  deep: ["vision_agent", "kernel", "browser_use"],
+};
+const backupOrder = (depth: ResearchDepth): BrowserEngine[] =>
+  ["browser_use", ...PREFERENCE[depth].filter((e) => e !== "browser_use")];
 const nap = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
     signal.throwIfAborted();
@@ -240,24 +253,31 @@ function browserUseRequests(key: string, signal: AbortSignal, fetcher: Fetcher, 
   return { headers, read };
 }
 
+// How far Browser Use Cloud's agent goes for each depth.
+const BROWSER_USE_DEPTH: Record<ResearchDepth, string> = {
+  quick: "Finish after a few relevant pages.",
+  deep: "Be thorough: visit many relevant pages from different sources before you finish.",
+};
+
 /**
- * Starts a Browser Use Cloud run for the question, capped at `maxCostUsd`. A run Scout did not hear
+ * Starts a Browser Use Cloud run for the task, capped at `maxCostUsd`. A run Scout did not hear
  * back about may exist, so that failure is never retried: another run would bill twice.
  */
 export async function createBrowserUseRun(
-  question: string,
+  input: ResearchInput,
   key: string,
   signal: AbortSignal,
   fetcher: Fetcher,
   { maxCostUsd, timeout }: { maxCostUsd: number; timeout: AbortSignal },
 ): Promise<BrowserUseRun> {
+  const { task, depth } = researchTask(input);
   let response: Response;
   try {
     response = await fetcher(browserUseBase, {
       method: "POST",
       headers: { "X-Browser-Use-API-Key": key, "Content-Type": "application/json" },
       body: JSON.stringify({
-        task: `Research this question using the web browser: ${question.slice(0, 4000)}. Visit relevant original pages. Reply with only a JSON object, no other text: a "summary" string and a "sources" array, each item containing the exact visited page "url", "title", and a concise "summary" of what that page actually says. For shopping pages include the product's actual image URL as "image" if present, never a generic photo. Do not invent or cite a page you did not visit. Do not log in, purchase, submit forms, or change any external account.`,
+        task: `Research this question using the web browser: ${task.slice(0, 4000)}. ${BROWSER_USE_DEPTH[depth]} Visit relevant original pages. Reply with only a JSON object, no other text: a "summary" string and a "sources" array, each item containing the exact visited page "url", "title", and a concise "summary" of what that page actually says. For shopping pages include the product's actual image URL as "image" if present, never a generic photo. Do not invent or cite a page you did not visit. Do not log in, purchase, submit forms, or change any external account.`,
         maxCostUsd,
         outputSchema: {
           type: "object",
@@ -363,7 +383,7 @@ async function completedRun(read: Read, runId: string, progress?: Progress): Pro
 }
 
 export async function browserUseResearch(
-  question: string,
+  input: ResearchInput,
   key: string,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
@@ -376,7 +396,7 @@ export async function browserUseResearch(
   const timeout = time.timeout ?? ((ms: number) => AbortSignal.timeout(ms));
   if (deadline - clock() < ENGINE_MIN_MS.browser_use) throw notEnoughTime("browser_use");
   const { read } = browserUseRequests(key, signal, fetcher, { deadline, clock, timeout });
-  const run = await createBrowserUseRun(question, key, signal, fetcher, {
+  const run = await createBrowserUseRun(input, key, signal, fetcher, {
     maxCostUsd: time.maxCostUsd ?? DEFAULT_MAX_COST_USD,
     timeout: timeout(Math.min(30_000, deadline - clock())),
   });
@@ -570,8 +590,13 @@ export function jevService(keys: { aimlapiKey?: string; typesafeKey?: string }):
     return { key: keys.typesafeKey, url: "https://api.typesafe.ai/v1/systemone", model: "jev-latest" };
 }
 
+const JEV_DEPTH: Record<ResearchDepth, string> = {
+  quick: "quick (a few relevant pages are enough)",
+  deep: "deep (the user asked for thorough research across many pages or sites)",
+};
+
 export async function jevChooseEngine(
-  question: string,
+  input: ResearchInput,
   service: JevService,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
@@ -580,58 +605,80 @@ export async function jevChooseEngine(
   /** A second try, after an engine failed: Browser Use Cloud is then the backup. */
   backup = false,
 ): Promise<BrowserEngine> {
-  // Without a usable answer, the preferred engine on offer: Kernel first, or the backup on a second try.
-  const preferred = (backup ? BACKUP : PREFERENCE).find((e) => options.includes(e))!;
+  const { task, depth } = researchTask(input);
+  // Without a usable answer, the engine the depth prefers, or the backup on a second try.
+  const preferred = (backup ? backupOrder(depth) : PREFERENCE[depth]).find((e) => options.includes(e))!;
   const pick = (engine: BrowserEngine, why: string): BrowserEngine => {
     progress?.(`JEV was ${why}; using ${ENGINE_LABELS[engine]}`);
     return engine;
   };
-  const fallback = (why: string) => pick(preferred, why);
+  // Why JEV gave no usable answer goes into the step, and the cause into the server log.
+  const unavailable = (why: string, detail: string) => {
+    // The key leaves the whole body before the cut, so no part of it is logged.
+    const shown = (service.key ? detail.replaceAll(service.key, "[key]") : detail).slice(0, 300);
+    console.warn(`JEV routing failed (${why}): ${shown}`);
+    return pick(preferred, `unavailable (${why})`);
+  };
+  const timeout = AbortSignal.timeout(4500);
+  let text: string;
   try {
     const response = await fetcher(service.url, {
       method: "POST",
       headers: { Authorization: `Bearer ${service.key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: service.model,
-        state: question.slice(0, 4000),
+        state: `Research task: ${task.slice(0, 4000)}\nResearch depth: ${JEV_DEPTH[depth]}`,
         questions: {
           route: {
             type: "choice",
-            instructions: "Choose the browser workflow for this research task. Prefer the Kernel options (vision_agent or kernel); choose browser_use only when the task clearly needs it.",
+            instructions: "Choose the browser workflow for this research task. kernel is the default and the fastest; choose vision_agent only when the task needs using a site like a person, and browser_use only when it clearly needs a heavy autonomous agent.",
             criteria: Object.fromEntries(options.map((e) => [e, JEV_CRITERIA[e]])),
           },
         },
       }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(4500)]),
+      signal: AbortSignal.any([signal, timeout]),
     });
-    if (!response.ok) return fallback("unavailable");
-    const body = await response.json() as {
-      answers?: { route?: { choice?: string; confidence?: number } };
-    };
-    const route = body.answers?.route;
-    const choice = options.find((e) => e === route?.choice);
-    if (!choice) return fallback("unavailable");
-    const sure = (route?.confidence || 0) >= 0.65;
-    // Browser Use Cloud costs the most; take it on a first try only when JEV is sure the task needs it.
-    if (choice === "browser_use" && !backup && !sure && preferred !== "browser_use") return fallback("unsure");
-    // Kernel only reads pages; when JEV is unsure, the vision agent browses instead (or the backup).
-    if (choice === "kernel" && !sure) {
-      const instead = backup ? preferred : options.includes("vision_agent") ? "vision_agent" : "kernel";
-      if (instead !== choice) return pick(instead, "unsure");
-    }
-    progress?.(`JEV selected ${ENGINE_LABELS[choice]}`);
-    return choice;
-  } catch {
+    text = await response.text();
+    if (!response.ok) return unavailable(`HTTP ${response.status}`, text);
+  } catch (error) {
     signal.throwIfAborted();
-    return fallback("unavailable");
+    const timedOut = timeout.aborted || (error instanceof Error && error.name === "TimeoutError");
+    return timedOut
+      ? unavailable("timed out", "no answer within 4.5 seconds")
+      : unavailable("network error", error instanceof Error ? error.message : String(error));
   }
+  let route: { choice?: unknown; confidence?: unknown } | undefined;
+  try {
+    route = (JSON.parse(text) as { answers?: { route?: typeof route } }).answers?.route;
+  } catch {
+    // Not JSON: an unexpected answer.
+  }
+  const choice = options.find((e) => e === route?.choice);
+  if (!choice) return unavailable("unexpected answer", text);
+  const sure = Number(route?.confidence || 0) >= 0.65;
+  // Browser Use Cloud costs the most; take it on a first try only when JEV is sure the task needs it.
+  if (choice === "browser_use" && !backup && !sure && preferred !== "browser_use") return pick(preferred, "unsure");
+  // An unsure plain Kernel answer stays Kernel for quick research; deep research browses with the
+  // vision agent instead, and a second try goes to the backup.
+  if (choice === "kernel" && !sure) {
+    const instead = backup ? preferred : depth === "deep" && options.includes("vision_agent") ? "vision_agent" : "kernel";
+    if (instead !== choice) return pick(instead, "unsure");
+  }
+  progress?.(`JEV selected ${ENGINE_LABELS[choice]}`);
+  return choice;
 }
 
-function kernelScript(question: string, directUrl?: string): string {
+/**
+ * Kernel's fixed Playwright script: it searches for the task's query (or opens the pasted link) and
+ * reads up to four pages side by side, each within `pageMs`.
+ */
+export function kernelScript(input: ResearchInput, directUrl?: string, { pageMs = 20_000 }: { pageMs?: number } = {}): string {
+  const { query } = researchTask(input);
   // Only fixed Playwright code runs in Kernel; the user's input is a quoted value.
   return `
-const question = ${JSON.stringify(question.slice(0, 400))};
+const query = ${JSON.stringify(query.slice(0, 400))};
 const direct = ${JSON.stringify(directUrl || "")};
+const pageMs = ${Math.round(pageMs)};
 const allowed = (value) => {
   try {
     const u = new URL(value);
@@ -645,8 +692,8 @@ const allowed = (value) => {
 let targets = direct ? [{ url: direct, title: direct }] : [];
 if (!direct) {
   for (const searchUrl of [
-    "https://www.google.com/search?q=" + encodeURIComponent(question),
-    "https://www.bing.com/search?q=" + encodeURIComponent(question)
+    "https://www.google.com/search?q=" + encodeURIComponent(query),
+    "https://www.bing.com/search?q=" + encodeURIComponent(query)
   ]) {
     try {
       await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
@@ -661,34 +708,47 @@ if (!direct) {
     } catch { /* Try the other public search page. */ }
   }
 }
-const out = [];
-for (const target of targets.slice(0, 4)) {
-  if (!allowed(target.url)) continue;
+// Each page in a tab of its own, all at once; a page that is not read within pageMs is left out.
+const withinTime = (work) => {
+  let timer;
+  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("The page took too long.")), pageMs); });
+  return Promise.race([work, late]).finally(() => clearTimeout(timer));
+};
+const readPage = async (target) => {
+  if (!allowed(target.url)) return null;
   const tab = await context.newPage();
   try {
-    await tab.goto(target.url, { waitUntil: "domcontentloaded", timeout: 12000 });
-    if (!allowed(tab.url())) continue;
-    const text = await tab.locator("main, article, body").first().innerText({ timeout: 5000 });
-    const metaImage = await tab.locator('meta[property="og:image"]').first()
-      .getAttribute("content").catch(() => null);
-    const image = metaImage ? new URL(metaImage, tab.url()).href : undefined;
-    out.push({ url: tab.url(), title: (await tab.title()).slice(0, 220) || target.title,
-      content: text.slice(0, 6000), image, read: true });
-  } catch { /* Skip an inaccessible page. */ }
-  finally { await tab.close(); }
-}
+    return await withinTime((async () => {
+      await tab.goto(target.url, { waitUntil: "domcontentloaded", timeout: 12000 });
+      if (!allowed(tab.url())) return null;
+      const text = await tab.locator("main, article, body").first().innerText({ timeout: 5000 });
+      const metaImage = await tab.locator('meta[property="og:image"]').first()
+        .getAttribute("content", { timeout: 1500 }).catch(() => null);
+      // A page can move on (or fail) while it is read; its address is checked again.
+      const url = tab.url();
+      if (!allowed(url)) return null;
+      const image = metaImage ? new URL(metaImage, url).href : undefined;
+      return { url, title: (await tab.title()).slice(0, 220) || target.title,
+        content: text.slice(0, 6000), image, read: true };
+    })());
+  } catch { return null; /* Skip an inaccessible page. */ }
+  finally { await tab.close().catch(() => {}); }
+};
+const read = await Promise.allSettled(targets.slice(0, 4).map(readPage));
+const out = read.flatMap((r) => (r.status === "fulfilled" && r.value ? [r.value] : []));
 return out;
 `;
 }
 
 export async function kernelResearch(
-  question: string,
+  input: ResearchInput,
   key: string,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
   time: ResearchTime = {},
 ): Promise<BrowserResult> {
+  const request = researchTask(input);
   const clock = time.clock ?? Date.now;
   const left = () => (time.deadline ?? Infinity) - clock();
   // Kernel reads its pages in one go; without time for that, do not open (and pay for) a browser.
@@ -705,8 +765,8 @@ export async function kernelResearch(
     throw new ResearchError("Kernel did not create a valid browser session.");
   progress?.("Kernel opened a separate cloud browser");
   try {
-    const directUrl = extractPublicUrls(question)[0];
-    progress?.(directUrl ? "Kernel is opening the supplied page" : "Kernel is finding and reading public pages");
+    const directUrl = extractPublicUrls(request.task)[0];
+    progress?.(directUrl ? "Kernel is opening the supplied page" : `Kernel is searching for “${request.query}” and reading public pages`);
     // The script, and the request waiting for it, end before research must.
     const seconds = Math.min(58, Math.floor((left() - 7000) / 1000));
     if (seconds < 5) throw notEnoughTime("kernel");
@@ -715,7 +775,7 @@ export async function kernelResearch(
     }>(
       await fetcher(`${kernelBase}/${id}/playwright/execute`, {
         method: "POST", headers,
-        body: JSON.stringify({ code: kernelScript(question, directUrl), timeout_sec: seconds }),
+        body: JSON.stringify({ code: kernelScript(request, directUrl), timeout_sec: seconds }),
         signal: AbortSignal.any([signal, AbortSignal.timeout(seconds * 1000 + 7000)]),
       }),
       "Kernel",
@@ -743,7 +803,7 @@ export async function kernelResearch(
 export async function chooseResearchEngine(
   requested: ResearchEngine,
   keys: { browserUseKey: string; kernelKey: string; jev?: JevService; visionAgent?: boolean },
-  question: string,
+  input: ResearchInput,
   signal: AbortSignal,
   fetcher: Fetcher = fetch,
   progress?: Progress,
@@ -761,18 +821,20 @@ export async function chooseResearchEngine(
     kernel: !!keys.kernelKey,
     browser_use: !!keys.browserUseKey,
   };
-  const untried = BACKUP.filter((e) => on[e] && !avoid.includes(e));
+  const request = researchTask(input);
+  const order = backupOrder(request.depth);
+  const untried = order.filter((e) => on[e] && !avoid.includes(e));
   const backup = avoid.length > 0 && untried.length > 0;
-  // In order of preference when JEV is not asked: Kernel first, or Browser Use Cloud as the backup.
-  const connected = backup ? untried : PREFERENCE.filter((e) => on[e]);
+  // In the depth's order of preference when JEV is not asked, or with Browser Use Cloud as the backup.
+  const connected = backup ? untried : PREFERENCE[request.depth].filter((e) => on[e]);
   // When no engine fits, the chosen one says there is not enough time.
   const fits = connected.filter((e) => timeLeft >= ENGINE_MIN_MS[e]);
   const available = fits.length ? fits : connected;
-  const skipped = BACKUP.filter((e) => connected.includes(e) && !available.includes(e));
+  const skipped = order.filter((e) => connected.includes(e) && !available.includes(e));
   if (skipped.length) progress?.(`Not enough time is left for ${skipped.map((e) => ENGINE_LABELS[e]).join(" or ")}`);
   // JEV reports its own decision, or why Scout fell back, through progress.
   if (available.length >= 2 && keys.jev)
-    return jevChooseEngine(question, keys.jev, signal, fetcher, progress, available, backup);
+    return jevChooseEngine(request, keys.jev, signal, fetcher, progress, available, backup);
   const engine = available[0] ?? "tavily";
   progress?.(`Selected ${ENGINE_LABELS[engine]}`);
   return engine;

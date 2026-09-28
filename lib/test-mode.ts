@@ -68,6 +68,8 @@ function reply(options: CallOptions): StreamPart[] {
   if (mayResearch && /research/i.test(question))
     return [
       ...thought("r", "The question asks for research."),
+      // Words before the call, as some models write them; Scout moves them into Thinking.
+      ...words("n", "I'll research that now."),
       { type: "tool-call", toolCallId: "test-call-1", toolName: "web_research", input: JSON.stringify({ task: question.slice(0, 2000) }) },
       finish("tool-calls"),
     ];
