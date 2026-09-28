@@ -1703,6 +1703,38 @@ try {
       await context.close();
     }
     {
+      // A reload mid-answer on a slow network: the saved answer sits still until the replay comes, so
+      // after a few quiet seconds, not at once, it says Scout is reconnecting.
+      const { context, page, errors } = await openLive(PHONE);
+      await ask(page, "Please research ferns on a slow network");
+      await streamingAnswer(page);
+      await page.waitForTimeout(1000);
+      await context.route(/\/stream\?startIndex=0$/, async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 7000));
+        await route.continue().catch(() => {});
+      });
+      await page.reload({ waitUntil: "networkidle" });
+      await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+      await page.locator(".mobile-menu").click();
+      await page.locator('[data-mobile="true"] .history-item', { hasText: "Please research ferns on a slow network" }).click();
+      await page.waitForSelector(".assistant-message .answer-body", { timeout: 5000 }).catch(() => {});
+      const noted = () => page.locator(".progress-strip", { hasText: "Reconnecting" }).count().then((n) => n > 0);
+      await page.waitForTimeout(2000);
+      const early = await noted();
+      const shown = await page.waitForFunction(
+        () => [...document.querySelectorAll(".progress-strip")].some((s) => /Reconnecting/.test(s.textContent)),
+        null, { timeout: 6000 },
+      ).then(() => true, () => false);
+      const finishedHere = await over(page);
+      const texts = await answerText(page);
+      check("research job: a slow replay after a reload says Scout is reconnecting after a few quiet seconds, not at once",
+        !early && shown, JSON.stringify({ early, shown }));
+      check("  the note goes when the replay lands, and the answer completes once",
+        finishedHere && !(await noted()) && onlyOnce(texts), JSON.stringify(texts.map((t) => t.slice(0, 80))));
+      check("  no page errors", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+    {
       // Stop ends the job on the server, including its Browser Use run.
       const { context, page, errors } = await openLive(PHONE);
       const before = await counters();

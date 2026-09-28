@@ -93,10 +93,13 @@ export function wakeAction({ waiting, reading, lastChunkAt, now }: { waiting: bo
   return reading && now - lastChunkAt >= HEALTHY_MS ? "refresh" : "none";
 }
 
-/** What a read of a job is doing: open, trying again after a lost connection, and its last chunk's time. */
+/**
+ * What a read of a job is doing: open; getting back to the job (trying again after a lost connection,
+ * or a replay that has not reached the Chat yet); and when the Chat last got a chunk.
+ */
 export type ReadState = { live: boolean; retrying: boolean; lastChunkAt: number };
 
-/** The page says Scout is reconnecting only when a lost connection has gone QUIET_MS without a chunk. */
+/** The page says Scout is reconnecting only when getting back to the job has gone QUIET_MS without a chunk. */
 export const reconnectingShown = (state: ReadState, now: number) =>
   state.live && state.retrying && now - state.lastChunkAt >= QUIET_MS;
 
@@ -118,17 +121,17 @@ const ends = (chunk: Chunk) =>
  * Passes an Answer's chunks through and, while its job runs, reads on from the next chunk when a
  * response window ends (`data-job` says where a window's chunks sit in the job's stream). A window
  * that drops, or cannot be opened, is tried again from the same place after `retryDelay`, only while
- * online, so the Chat never sees the drop; only a job the server no longer has (`open` returns null),
- * a refused access code, or MAX_TRIES failures in a row end the read. `from` starts a read with no
- * first window: a replay from the start of the job's stream, which `hold` keeps back until it reaches
- * where the stream was when it opened (up to HOLD_MS), then passes on at once.
+ * online, so the Chat never sees the drop; only the job's last chunk, a job the server no longer has
+ * (`open` returns null), a refused access code, or MAX_TRIES failures in a row end the read. `from`
+ * starts a read with no first window: a replay from the start of the job's stream, which `hold` keeps
+ * back until it reaches where the stream was when it opened (up to HOLD_MS), then passes on at once.
  */
 export function continueJob(
   first: ReadableStream<Chunk> | undefined,
   { open, onGone, onState, signal, from, hold = false, clock = systemClock, network = browserNetwork }: {
     open: Open;
     onGone?: (runId: string) => void;
-    /** Hears when the read loses its connection, gets it back, and ends. */
+    /** Hears when the read starts or stops getting back to the job (see ReadState), and when it ends. */
     onState?: (state: ReadState) => void;
     signal?: AbortSignal;
     from?: { id: string; index: number };
@@ -145,11 +148,14 @@ export function continueJob(
   let ended = false;
   let closed = false;
   let retrying = false;
+  // A replay that has passed nothing on yet: the Chat still shows the saved Answer, standing still.
+  let catchingUp = !!from;
   // A window dropped on purpose (wakeAction's "refresh"): opened again at once, and not a failure.
   let refreshing = false;
   let tries = 0;
   let delay = 0;
   let lastChunkAt = clock.now();
+  let shownAt = lastChunkAt;
   let windowAt = lastChunkAt;
   let windowChunks = 0;
   // A replay's chunks kept back until it has caught up, and the last index it keeps back.
@@ -159,29 +165,41 @@ export function continueJob(
   let holdTimer: unknown;
   let holdOver: Promise<"late"> | undefined;
 
-  const report = () => onState?.({ live: !closed, retrying, lastChunkAt });
+  // The read starts as its opener says (see follow); only changes are reported from there.
+  let said = { live: true, retrying: catchingUp };
+  const report = () => {
+    const state = { live: !closed, retrying: retrying || catchingUp };
+    if (state.live === said.live && state.retrying === said.retrying) return;
+    said = state;
+    onState?.({ ...state, lastChunkAt: shownAt });
+  };
   const lost = (error: unknown) => {
     tries++;
     if (tries >= MAX_TRIES) throw error;
     delay = retryDelay(tries);
-    if (!retrying) {
-      retrying = true;
-      report();
-    }
+    retrying = true;
+    report();
   };
   const stopHolding = () => {
     holdTo = undefined;
     clock.clearTimeout(holdTimer);
   };
-  const release = (controller: ReadableStreamDefaultController<Chunk>) => {
+  // Passes on what the replay held back and `chunk`: the Chat has something new to show.
+  const release = (controller: ReadableStreamDefaultController<Chunk>, chunk?: Chunk) => {
     stopHolding();
-    for (const chunk of held) controller.enqueue(chunk);
+    if (chunk) held.push(chunk);
+    if (!held.length) return;
+    for (const one of held) controller.enqueue(one);
     held = [];
+    shownAt = clock.now();
+    catchingUp = false;
+    report();
   };
   const end = (controller?: ReadableStreamDefaultController<Chunk>) => {
     if (closed) return;
     closed = true;
     retrying = false;
+    catchingUp = false;
     stopHolding();
     waiting?.stop();
     report();
@@ -211,7 +229,8 @@ export function continueJob(
 
   const next = async (controller: ReadableStreamDefaultController<Chunk>) => {
     for (;;) {
-      if (gone() || (!reader && !place)) return end(controller);
+      // Past the job's last chunk the Answer is whole, so a window that drops then is not read again.
+      if (gone() || (!reader && (ended || !place))) return end(controller);
       if (!reader) {
         if (delay) await pause(delay);
         delay = 0;
@@ -254,7 +273,7 @@ export function continueJob(
       } catch (error) {
         pending = undefined;
         reader = undefined;
-        if (gone()) return end(controller);
+        if (gone() || ended) return end(controller);
         // The chat request itself, before its job was known: the Chat hears of it.
         if (!place) throw error;
         if (refreshing) refreshing = false;
@@ -284,10 +303,8 @@ export function continueJob(
       }
       const chunk = result.value;
       lastChunkAt = clock.now();
-      if (retrying) {
-        retrying = false;
-        report();
-      }
+      retrying = false;
+      report();
       if (chunk.type === "data-job") {
         place = { id: chunk.data.id, index: chunk.data.index };
         const tail = chunk.data.tail;
@@ -310,8 +327,7 @@ export function continueJob(
         held.push(chunk);
         continue;
       }
-      release(controller);
-      controller.enqueue(chunk);
+      release(controller, chunk);
       return;
     }
   };
@@ -416,7 +432,8 @@ export class JobChatTransport extends DefaultChatTransport<ScoutMessage> {
       network: this.network,
     });
     this.read = read;
-    this.update({ live: true, retrying: false, lastChunkAt: this.clock.now() });
+    // A replay from the start is getting back to the job until its first chunk reaches the Chat.
+    this.update({ live: true, retrying: !!from, lastChunkAt: this.clock.now() });
     return read;
   }
 

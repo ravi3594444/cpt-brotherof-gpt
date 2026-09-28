@@ -162,13 +162,15 @@ request meets Vercel's 300-second limit. The chat transport
 (`lib/research-job-client.ts`) does the same when a response drops or cannot be
 opened: it tries again from the next chunk after 1, 2, 4 and 8 seconds, then every
 15, only while the device is online, so the Chat never sees the drop and nothing
-is replayed. Only a job the server no longer has (204), a refused access code
-(401, 403), or 20 failed tries in a row (about four minutes) end the read. When
+is replayed. Only the job's last chunk (a window that drops after it is not read
+again), a job the server no longer has (204), a refused access code (401, 403),
+or 20 failed tries in a row (about four minutes) end the read. When
 the app comes back (visibilitychange, Capacitor's document `resume`, `online`), a
 read waiting to try again tries at once, a read with no chunk for 10 seconds opens
 a fresh window from the same place (its connection may have died while the app
 was away), and a healthy read is left alone. "Reconnecting…" shows only while a
-lost connection has gone 4 seconds without a chunk. The client replays a job from
+lost connection, or a replay that has not reached the screen yet, has gone 4
+seconds without a chunk on screen. The client replays a job from
 index 0 only when it has no live read of it: after a reload, when its
 Conversation opens, or after the transport gave up. Each response's `data-job`
 part says where its chunks sit in the job's stream and the index of the stream's

@@ -365,6 +365,35 @@ test("while offline a read waits, and tries again as soon as the device is back 
   assert.deepEqual(deltas(out), ["a", "b"]);
 });
 
+test("a window that drops after the job's last chunk ends the read at once, also offline", async () => {
+  for (const ending of [
+    [finish],
+    [{ type: "message-metadata", messageMetadata: { job: { end: "stopped" } } }, { type: "abort" }],
+    [{ type: "message-metadata", messageMetadata: { job: { end: "failed" } } }, { type: "error", errorText: "Research stopped unexpectedly." }],
+  ]) {
+    for (const online of [false, true]) {
+      const { clock, network } = reading(fakeNetwork(online));
+      const opened = [];
+      const states = [];
+      const out = await drive(continueJob(failing([place("wrun_1", 3), delta("a"), ...ending]), {
+        clock,
+        network,
+        onState: (state) => states.push(state),
+        open: async (id, index) => {
+          opened.push(index);
+          return null;
+        },
+        onGone: () => assert.fail("the Answer is whole, not gone"),
+      }), clock);
+      assert.deepEqual(deltas(out), ["a"]);
+      assert.equal(out.at(-1).type, ending.at(-1).type);
+      assert.deepEqual(opened, [], "nothing is read past the end");
+      assert.equal(clock.now(), 0, "and nothing is waited for");
+      assert.deepEqual(states.map(({ live, retrying }) => [live, retrying]), [[false, false]], "never said to be reconnecting");
+    }
+  }
+});
+
 test("waking a read that waits to reconnect tries at once", async () => {
   const { clock, network } = reading();
   const opened = [];
@@ -552,6 +581,85 @@ test("the transport replays a job from its start after a reload, held until it h
   const out = await drive(stream, clock);
   assert.deepEqual(deltas(out), ["a", "b"]);
   assert.equal(transport.link().live, false);
+});
+
+/** A job's stream response the test feeds by hand. */
+function sseByHand() {
+  const encoder = new TextEncoder();
+  let controller;
+  const response = new Response(new ReadableStream({
+    start(c) {
+      controller = c;
+    },
+  }), { headers: { "content-type": "text/event-stream" } });
+  return {
+    response,
+    send: (...chunks) => chunks.forEach((c) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(c)}\n\n`))),
+    close: () => controller.close(),
+  };
+}
+const replayTransport = (clock, network, fetch) => new JobChatTransport({
+  api: "/api/chat",
+  headers: () => ({}),
+  runId: () => "wrun_1",
+  onGone: () => assert.fail("the job is still there"),
+  clock,
+  network,
+  fetch,
+});
+const readRest = async (reader) => {
+  const out = [];
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return out;
+    out.push(value);
+  }
+};
+
+test("a replay after a reload that is slow to come says Reconnecting after a few quiet seconds, until it shows", async () => {
+  const { clock, network } = reading();
+  let respond;
+  const transport = replayTransport(clock, network, () => new Promise((resolve) => {
+    respond = () => resolve(sse([place("wrun_1", 0, 2), start, delta("a"), delta("b"), finish]));
+  }));
+  const reader = (await transport.reconnectToStream({ chatId: "c1" })).getReader();
+  const first = reader.read();
+  await settle();
+  assert.deepEqual(transport.link(), { live: true, reconnecting: false }, "a replay that comes quickly needs no note");
+  assert.deepEqual(clock.waiting(), [QUIET_MS]);
+  clock.next();
+  assert.deepEqual(transport.link(), { live: true, reconnecting: true }, "the saved answer sits still: Scout says it is reconnecting");
+  respond();
+  assert.equal((await first).value.type, "data-job");
+  assert.deepEqual(transport.link(), { live: true, reconnecting: false }, "the replay has reached the Chat");
+  assert.deepEqual(deltas(await readRest(reader)), ["a", "b"]);
+  assert.deepEqual(transport.link(), { live: false, reconnecting: false });
+});
+
+test("a replay held while it catches up says Reconnecting after a few quiet seconds, until it is passed on", async () => {
+  const { clock, network } = reading();
+  const window = sseByHand();
+  const transport = replayTransport(clock, network, async () => window.response);
+  const reader = (await transport.reconnectToStream({ chatId: "c1" })).getReader();
+  const first = reader.read();
+  window.send(place("wrun_1", 0, 30), start, delta("a"));
+  await settle();
+  assert.deepEqual(transport.link(), { live: true, reconnecting: false });
+  // Chunks come in, but none reaches the answer on screen yet.
+  clock.next();
+  assert.equal(clock.now(), QUIET_MS);
+  assert.deepEqual(transport.link(), { live: true, reconnecting: true });
+  window.send(delta("b"));
+  await settle();
+  assert.deepEqual(transport.link(), { live: true, reconnecting: true }, "still held");
+  clock.next();
+  assert.equal(clock.now(), HOLD_MS);
+  assert.equal((await first).value.type, "data-job");
+  assert.deepEqual(transport.link(), { live: true, reconnecting: false }, "shown as it comes from here");
+  window.send(delta("c"), finish);
+  window.close();
+  assert.deepEqual(deltas(await readRest(reader)), ["a", "b", "c"]);
+  assert.deepEqual(transport.link(), { live: false, reconnecting: false });
 });
 
 test("a job gone from the server ends the transport's replay, and the page hears of it", async () => {
