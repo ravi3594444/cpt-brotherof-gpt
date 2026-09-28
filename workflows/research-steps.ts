@@ -83,13 +83,13 @@ export async function openJob(input: ResearchJobInput): Promise<{ state: AnswerS
 }
 openJob.maxRetries = 1;
 
-/** Chooses the engine again for a second research attempt. */
-export async function chooseAgain(input: ResearchJobInput, state: AnswerState, task: string): Promise<{ state: AnswerState; engine: Engine }> {
+/** Chooses the engine again for a second research attempt; Auto tries an engine not `tried` yet. */
+export async function chooseAgain(input: ResearchJobInput, state: AnswerState, task: string, tried: string[]): Promise<{ state: AnswerState; engine: Engine }> {
   "use step";
   const c = stepContext("none");
   try {
     const { keys, fetcher } = c.services;
-    return { state, engine: await chooseEngine(task, input.engine, keys, c.signal, fetcher, researchProgress(state, c.writer)) };
+    return { state, engine: await chooseEngine(task, input.engine, keys, c.signal, fetcher, researchProgress(state, c.writer), Infinity, tried) };
   } catch {
     return { state, engine: "tavily" };
   } finally {

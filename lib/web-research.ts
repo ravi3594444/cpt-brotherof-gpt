@@ -34,6 +34,8 @@ export async function chooseEngine(
   fetcher: Fetcher,
   progress: ResearchProgress,
   timeLeft = Infinity,
+  /** Engines already tried for this Answer; Auto tries another one. */
+  tried: readonly string[] = [],
 ): Promise<Exclude<ResearchEngine, "auto">> {
   progress.step("Choosing a research path");
   const chosen = await chooseResearchEngine(
@@ -44,6 +46,7 @@ export async function chooseEngine(
     fetcher,
     progress.step,
     timeLeft,
+    tried,
   );
   // The Search API path stays in "searching" until it starts reading pages.
   progress.update(chosen === "tavily" ? { engine: chosen } : { phase: "reading", engine: chosen });
@@ -72,12 +75,15 @@ export function webResearch({ keys, engine, model, conversation, keepAlive, fetc
       // Without the platform's help the cleanup still runs, unawaited.
     }
   };
+  // A second research for the same Answer tries another engine.
+  const tried: string[] = [];
   return async (task, request, progress, deadline) => {
     const services = fetcher ?? fetch;
     // Engines end by the deadline themselves; this stops any request still waiting just after it.
     const signal = AbortSignal.any([request, AbortSignal.timeout(Math.max(0, deadline - Date.now()) + 5000)]);
     try {
-      const chosen = await chooseEngine(task, engine, keys, signal, services, progress, deadline - Date.now());
+      const chosen = await chooseEngine(task, engine, keys, signal, services, progress, deadline - Date.now(), tried);
+      tried.push(chosen);
       if (chosen === "tavily")
         return { ...(await searchApiResearch(task, keys.searchKey, model, conversation, signal, progress)), engine: chosen };
       const time = { deadline, keepAlive: lasting, maxCostUsd };

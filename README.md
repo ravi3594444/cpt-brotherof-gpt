@@ -94,8 +94,14 @@ is lower, which turns 16,000 away, gets the answer with 4,096. For a self-hosted
 reasoning model whose chat template opens the `<think>` block itself (DeepSeek
 R1 or QwQ on vLLM or SGLang), start the server with its reasoning parser so the
 thinking arrives as `reasoning_content`; otherwise it shows in the answer. The two
-browser keys together enable engine choice in the chat. JEV is optional and
-only selects the path in Auto mode. It does not browse, answer, or run locally
+browser keys together enable engine choice in the chat. In Auto, Kernel does
+most research: the Vision agent for browsing, plain Kernel for reading links,
+and Browser Use Cloud only when JEV is at least 65% sure a task needs its
+heavier agent. When JEV is unsure or unavailable, or without a JEV key, Auto
+uses the Vision agent, then Kernel, then Browser Use Cloud. A second research
+for the same answer, after the first failed, tries an engine not used yet, with
+Browser Use Cloud as the backup. JEV is optional and only selects the path in
+Auto mode. It does not browse, answer, or run locally
 on Android. The current private preview already has its answer model
 configured; its browser services still need keys. Never commit real keys or
 put them in `NEXT_PUBLIC_` variables.
@@ -196,5 +202,5 @@ logged JEV outcome, pasted-link extraction, conversation preparation, and
 legacy search error behavior. A
 TypeScript check and production build cover the UI and API. The provider
 paths cannot be tested end-to-end without the separate Browser Use, Kernel,
-and optional JEV (AI/ML API or TypeSafe) keys. Browser Use Cloud runs are capped at one US dollar
-per question; page summaries should always be checked against the links.
+and optional JEV (AI/ML API or TypeSafe) keys. Browser Use Cloud runs are capped at `RESEARCH_MAX_COST_USD` (two US dollars
+by default) per run; page summaries should always be checked against the links.

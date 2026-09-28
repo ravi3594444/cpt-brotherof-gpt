@@ -39,14 +39,16 @@ export async function researchJob(input: ResearchJobInput) {
   let turn: Turn = { mode: input.handoff.mode, calls: input.handoff.calls, responseMessages: input.handoff.responseMessages };
   let task = input.handoff.task;
   let { state, engine } = await openJob(input);
-  // A second round only after a failure the Answer model may retry.
+  // A second round only after a failure the Answer model may retry, with an engine not tried yet.
+  const tried: string[] = [];
   for (let round = 1; round <= 2; round++) {
+    tried.push(engine);
     const researched = await research(input, state, engine, task);
     const next = await answerStep(input, turn, researched.state, researched.result, round);
     if (!next) return;
     turn = { ...turn, calls: next.calls, responseMessages: next.responseMessages };
     task = next.task;
-    ({ state, engine } = await chooseAgain(input, next.state, task));
+    ({ state, engine } = await chooseAgain(input, next.state, task, tried));
   }
 }
 
