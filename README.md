@@ -40,6 +40,8 @@ Put these values in the host's secret environment, not in the app bundle:
 | `VISION_MODEL_BASE_URL` | OpenAI-compatible address of the vision model; defaults to `https://api.aimlapi.com/v1` |
 | `VISION_MODEL_API_KEY` | Key for the vision model; defaults to `AIMLAPI_API_KEY` |
 | `SCOUT_ACCESS_CODE` | Optional. When set, the app and API ask for this code, so strangers who find the site cannot spend your credit |
+| `RESEARCH_MAX_COST_USD` | Optional money cap for one research's Browser Use run, in US dollars (default 2). A Research job has no time limit, so this cap and Stop are what end a run that never finishes |
+| `SCOUT_DURABLE_RESEARCH` | Optional. `off` keeps research inside the chat request, with its 200-second budget, even on Vercel |
 
 For live research, connect the model plus Browser Use **or** Kernel. With
 the Web chip on, the answer model gets a `web_research` tool and decides for
@@ -49,7 +51,25 @@ writing, math or code gets a direct reply with no research and no citations.
 The answer model should support OpenAI-style tool calling. If the provider
 rejects tools, Scout asks the model in plain text whether to research (one
 word, RESEARCH or ANSWER) and then researches or answers directly.
-Research has a time budget: it ends 200 seconds into the request, so the
+
+On Vercel, research runs as a **Research job** (Vercel Workflows, included in
+the free Hobby plan). A reply that needs no research, such as "hi", stays in
+the chat request and is as fast as before. When the answer model calls
+`web_research`, the rest of the turn moves into a job: the research, split
+into steps of a few minutes each, then the answer, written in a step of its
+own. A job has no time limit. Browser Use can browse for as long as the task
+needs (up to its own 4-hour session), and the Vision agent can take up to 60
+steps. Only `RESEARCH_MAX_COST_USD`, Stop, and a guard against runs that never
+end (60 Browser Use windows, about 4 hours) stop it early. The job keeps going
+when the app is closed, the phone locks or the connection drops; the app reads
+the answer again when it comes back, and it survives a reload. Vercel keeps a
+finished job for one day on Hobby, so an answer left unopened longer than that
+is gone and Scout says so. A typical job uses about 20 to 40 of Hobby's 50,000
+workflow events a month. Research jobs need Vercel (or `next dev` and
+`next start`, which run them locally); on Cloudflare, research stays in the
+request as described next.
+
+Without Research jobs, research has a time budget: it ends 200 seconds into the request, so the
 answer has time before the 280-second ceiling. Browser Use Cloud gets that
 whole budget, since shopping sites often need one to three minutes. If it
 runs out of time or stops early, Scout keeps up to six pages the agent had
@@ -106,8 +126,8 @@ different answer model, set `regions` to the Vercel region closest to it.
 
 Vercel limits request bodies to 4.5 MB, so the chat route refuses requests
 over 4.4 MB (photos are shrunk on the device and fit well inside). The chat
-route may run for up to 150 seconds (`maxDuration`); every Vercel plan allows
-that with Fluid compute. Without `SCOUT_ACCESS_CODE`, anyone who finds the
+route may run for up to 300 seconds (`maxDuration`), the most Hobby allows;
+Research jobs are not bound by it. Without `SCOUT_ACCESS_CODE`, anyone who finds the
 Vercel address can use Scout with your keys' credit.
 
 ## Development

@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Capacitor copies and Gradle builds generated JavaScript under android/.
     "android/**",
+    // Workflow routes that withWorkflow generates on every build.
+    "app/.well-known/workflow/**",
   ]),
   {
     files: ["components/ui/**/*.{ts,tsx}", "hooks/use-mobile.ts"],

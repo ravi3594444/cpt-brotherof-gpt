@@ -98,6 +98,29 @@ test("each conversation gets one Chat, created once and reused", () => {
   assert.ok(chats.has("a") && chats.has("b"));
 });
 
+test("the Chats it keeps can be listed, so the page can reconnect them when the app comes back", () => {
+  const { chats, open } = setup();
+  const a = open("a");
+  ask(a);
+  const b = open("b");
+  assert.deepEqual(chats.entries().map(([id, chat]) => [id, chat]), [["a", a], ["b", b]]);
+  a.setStatus("ready");
+  assert.deepEqual(chats.entries().map(([id]) => id), ["b"], "a finished Chat off screen is let go");
+});
+
+test("a Chat that was let go can be kept again under its Conversation, when it reconnects off screen", () => {
+  const { chats, open, saves } = setup();
+  const a = open("a");
+  ask(a);
+  open("b");
+  a.setStatus("ready");
+  assert.equal(chats.has("a"), false);
+  assert.equal(chats.get("a", () => a), a);
+  a.setStatus("submitted");
+  assert.deepEqual(chats.running(), ["a"]);
+  assert.equal(saves.at(-1).id, "a");
+});
+
 test("opening a conversation does not save it", () => {
   const { saves, open } = setup();
   open("a", [{ role: "user", text: "Old?" }, { role: "assistant", text: "Old." }]);

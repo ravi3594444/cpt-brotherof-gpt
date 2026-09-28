@@ -17,10 +17,16 @@ export type ResearchData = {
   engine?: "browser_use" | "kernel" | "vision_agent" | "tavily";
   steps?: string[];
 };
+/**
+ * The Research job writing an Answer: its run id, and once it is over, how it ended. "expired" means
+ * the server no longer keeps its stream.
+ */
+export type ResearchJob = { id?: string; end?: "done" | "stopped" | "failed" | "expired" };
 export type ScoutMessage = UIMessage<
   // thinkingMs: how long the Answer model's finished thoughts took in all.
-  { demo?: boolean; thinkingMs?: number },
-  { research: ResearchData; suggestions: string[] }
+  { demo?: boolean; thinkingMs?: number; job?: ResearchJob },
+  // job: where a response's chunks sit in the job's stream (a transient part, never saved).
+  { research: ResearchData; suggestions: string[]; job: { id: string; index: number } }
 >;
 export type ScoutConfig = {
   // "required" hides the workspace until the right access code is sent.
@@ -39,12 +45,18 @@ export type ScoutConfig = {
     // A vision model for photos and the vision agent.
     vision: boolean;
   };
+  // Research runs as a Research job that outlives the request (Vercel Workflows).
+  durable?: boolean;
+  // Test mode only: how many Research jobs this server has started.
+  test?: { jobsStarted: number; browserRunsCancelled: number };
 };
 export type LocalThread = {
   id: string;
   title: string;
   updatedAt: number;
   messages: ScoutMessage[];
+  // The Research job still writing this Conversation's last Answer.
+  activeRunId?: string;
 };
 export const DEMO_QUESTION = "How do AI agents search the web?";
 // The sample that shows a source card with a picture.

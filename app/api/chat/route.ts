@@ -1,5 +1,4 @@
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { after } from "next/server";
 import { z } from "zod";
 import { serverConfig } from "@/lib/server-config";
@@ -8,10 +7,14 @@ import { streamAnswer } from "@/lib/answer";
 import { answerErrorMessage, modelConversation, PhotoError, withPhotoDescription } from "@/lib/conversation";
 import { describePhotos } from "@/lib/vision";
 import { demoAnswer, withoutCitations } from "@/lib/demo";
+import type { Chunk } from "@/lib/job-stream";
 import { ResearchError } from "@/lib/research";
+import { answerModel, jobInput, jobTiming, researchServices } from "@/lib/research-job";
 import { webResearch } from "@/lib/web-research";
 import type { ScoutMessage } from "@/lib/chat-types";
 const inputSchema = z.object({
+  // The Conversation's id, which finds its Research job after a cold start.
+  id: z.string().regex(/^[\w-]{1,100}$/).optional(),
   messages: z
     .array(
       z.object({
@@ -58,8 +61,8 @@ const wait = (ms: number, signal: AbortSignal) =>
     signal.addEventListener("abort", abort, { once: true });
   });
 export async function POST(request: Request) {
-  // Research and the answer share the 280-second ceiling from here.
-  const startedAt = Date.now();
+  // Research and the answer share the 280-second ceiling from here, unless a Research job takes over.
+  let startedAt = Date.now();
   const origin = request.headers.get("origin");
   if (origin && origin !== new URL(request.url).origin)
     return new Response("This request must come from your Scout workspace.", {
@@ -70,6 +73,9 @@ export async function POST(request: Request) {
     return new Response("Scout needs its access code. Reload Scout and enter it again.", {
       status: 401,
     });
+  // Test mode can date a request back, to show that a Research job has no request budget.
+  if (config.testMode) startedAt -= Math.min(Number(request.headers.get("x-scout-test-started-ago")) || 0, 3_600_000);
+  const services = researchServices(config);
   if (Number(request.headers.get("content-length") || 0) > MAX_REQUEST_CHARS)
     return new Response("This question is too large. Try fewer photos, or start a new chat.", {
       status: 413,
@@ -99,20 +105,24 @@ export async function POST(request: Request) {
     return new Response("Your question must contain 1 to 6000 characters.", {
       status: 400,
     });
-  const demo = input.preview || !(config.apiKey && config.baseURL && config.model);
-  if (!demo && input.webEnabled && !(config.searchKey || config.browserUseKey || config.kernelKey))
+  const demo = input.preview || !(config.testMode || (config.apiKey && config.baseURL && config.model));
+  const { keys } = services;
+  if (!demo && input.webEnabled && !(keys.searchKey || keys.browserUseKey || keys.kernelKey))
     return new Response(
       "Web research needs a Browser Use Cloud or Kernel key. Choose sample mode to explore the interface.",
       { status: 503 },
     );
   if (!demo && input.webEnabled && input.engine !== "auto" && !({
-    browser_use: config.browserUseKey,
-    kernel: config.kernelKey,
-    vision_agent: config.kernelKey && config.vision,
-    tavily: config.searchKey,
+    browser_use: keys.browserUseKey,
+    kernel: keys.kernelKey,
+    vision_agent: keys.kernelKey && keys.vision,
+    tavily: keys.searchKey,
   }[input.engine]))
     return new Response("That research engine is not connected in this workspace.", { status: 503 });
   const signal = AbortSignal.any([request.signal, AbortSignal.timeout(280000)]);
+  // Plain chat stays in this request; only research runs as a Research job.
+  const durable = config.durable && input.webEnabled;
+  const messageId = crypto.randomUUID();
   const stream = createUIMessageStream<ScoutMessage>({
     onError: (error) =>
       error instanceof ResearchError
@@ -121,7 +131,7 @@ export async function POST(request: Request) {
     execute: async ({ writer }) => {
       writer.write({
         type: "start",
-        messageId: crypto.randomUUID(),
+        messageId,
         messageMetadata: { demo },
       });
       if (demo) {
@@ -177,41 +187,66 @@ export async function POST(request: Request) {
         writer.write({ type: "finish", finishReason: "stop" });
         return;
       }
-      let baseURL: URL;
-      try {
-        baseURL = new URL(config.baseURL);
-        if (baseURL.protocol !== "https:") throw new Error();
-      } catch {
-        throw new ResearchError(
-          "The workspace model endpoint must be a valid HTTPS URL.",
-        );
-      }
-      const provider = createOpenAICompatible({
-        name: "scout-provider",
-        baseURL: baseURL.href.replace(/\/$/, ""),
-        apiKey: config.apiKey,
-      });
-      const model = provider(config.model);
+      const model = answerModel(config);
       let answerMessages = messages;
       // A text-only answer model gets photos as words: the vision helper
       // describes them before the answer model decides whether to research.
-      if (photos && config.vision) {
+      if (photos && config.vision && !config.testMode) {
         answerMessages = withPhotoDescription(messages, await describePhotos(config.vision, question, images, signal));
         photosToModel = 0;
       }
+      // What the Answer streams before a Research job takes over; the job sends it again first.
+      const streamed: Chunk[] = [];
       await streamAnswer({
         model,
         messages: answerMessages,
         question,
         webEnabled: input.webEnabled,
         // Closing cloud browsers outlives the response through the platform's waitUntil.
-        research: webResearch({ keys: config, engine: input.engine, model, conversation: answerMessages, keepAlive: after }),
-        writer,
-        modelName: config.modelName,
+        research: webResearch({
+          keys, engine: input.engine, model, conversation: answerMessages, keepAlive: after,
+          fetcher: services.fetcher, maxCostUsd: services.maxCostUsd,
+        }),
+        writer: durable
+          ? {
+            write: (chunk) => {
+              streamed.push(chunk);
+              writer.write(chunk);
+            },
+          }
+          : writer,
+        modelName: services.modelName,
         photos,
         photosToModel,
         signal,
         startedAt,
+        ...(durable && {
+          handoff: async (handoff) => {
+            const timing = jobTiming(config);
+            // Loaded only here: a server without workflows never loads the workflow runtime.
+            const { startResearchJob } = await import("@/lib/research-job-server");
+            const job = await startResearchJob(jobInput({
+              chatId: input.id ?? messageId,
+              messageId,
+              engine: input.engine,
+              messages: answerMessages,
+              handoff,
+              prefix: streamed,
+              photos,
+              photosToModel,
+              modelName: services.modelName,
+              startedAt,
+            }), {
+              // This response ends inside its function's time; the client then reads on from the job.
+              until: (config.testMode ? Date.now() : startedAt) + timing.streamWindowMs,
+              signal: request.signal,
+              pollMs: timing.statusPollMs,
+              testMode: config.testMode,
+            });
+            writer.write({ type: "message-metadata", messageMetadata: { job: { id: job.runId } } });
+            writer.merge(job.stream);
+          },
+        }),
       });
     },
   });

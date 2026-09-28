@@ -1,9 +1,9 @@
 "use client";
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, useSyncExternalStore } from "react";
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
 import { nanoid } from "nanoid";
 import { Chat, useChat } from "@ai-sdk/react";
-import { DefaultChatTransport, type FileUIPart } from "ai";
+import type { FileUIPart } from "ai";
 import {
   ArrowUp,
   ArrowUpRight,
@@ -100,6 +100,15 @@ import { historyPhotoUrl, preparePhoto } from "@/lib/photos";
 import { SIDEBAR_BOOT_ATTRIBUTE, readSidebarOpen, saveSidebarOpen } from "@/lib/sidebar";
 import { createChatRegistry, type ChatRegistry, type SaveInfo } from "@/lib/chat-registry";
 import { applyDrafts, pendingDrafts, readDrafts, type Drafts } from "@/lib/history-drafts";
+import {
+  JobChatTransport,
+  activeRunId,
+  jobErrorShown,
+  lastJob,
+  mayHaveLostJob,
+  resumePlan,
+  withJobEnd,
+} from "@/lib/research-job-client";
 import {
   DEMO_QUESTION,
   PHOTO_SAMPLE,
@@ -250,6 +259,91 @@ async function fetchConfig(code?: string): Promise<ScoutConfig | null> {
     return null;
   }
 }
+type Chats = ChatRegistry<Chat<ScoutMessage>>;
+const isBusy = (status: Chat<ScoutMessage>["status"]) => status === "submitted" || status === "streaming";
+// Research jobs the server found for Conversations whose job id this device never got.
+const foundJobs = new Map<string, string>();
+const jobOf = (id: string, chat: Chat<ScoutMessage>) => activeRunId(chat.messages) ?? foundJobs.get(id);
+// Chats reconnecting now, and each one's next try after a lost connection.
+const reconnecting = new Set<Chat<ScoutMessage>>();
+const retries = new Map<Chat<ScoutMessage>, { tries: number; timer?: ReturnType<typeof setTimeout> }>();
+const settled = (chat: Chat<ScoutMessage>) =>
+  new Promise<void>((resolve) => {
+    if (!isBusy(chat.status)) return resolve();
+    const off = chat["~registerStatusCallback"](() => {
+      if (isBusy(chat.status)) return;
+      off();
+      resolve();
+    });
+  });
+/**
+ * Reads a Research job's Answer again from the start of its stream: the replay replaces what the
+ * Chat shows. `restartLive` also drops a read that may have gone quiet, as when the app comes back.
+ */
+async function reconnect(id: string, chat: Chat<ScoutMessage>, chats: Chats, restartLive: boolean) {
+  const plan = resumePlan({ status: chat.status, runId: jobOf(id, chat), restartLive });
+  if (plan === "none" || reconnecting.has(chat)) return;
+  reconnecting.add(chat);
+  try {
+    clearTimeout(retries.get(chat)?.timer);
+    if (plan === "restart") {
+      void chat.stop();
+      await settled(chat);
+    }
+    // Stopping a Chat off screen lets the registry forget it; it keeps saving under its Conversation.
+    chats.get(id, () => chat);
+    chat.clearError();
+    void chat.resumeStream();
+  } finally {
+    reconnecting.delete(chat);
+  }
+}
+/** After a lost connection, tries again a little later while the page is on screen and online. */
+function retryLater(id: string, chat: Chat<ScoutMessage>, chats: Chats) {
+  const retry = retries.get(chat) ?? { tries: 0 };
+  retries.set(chat, retry);
+  clearTimeout(retry.timer);
+  retry.timer = setTimeout(() => {
+    if (document.visibilityState === "visible" && navigator.onLine) void reconnect(id, chat, chats, false);
+  }, Math.min(30_000, 2000 * 2 ** retry.tries++));
+}
+/** Stops a Conversation's Research job on the server; the Chat stops reading it separately. */
+function cancelJob(runId: string) {
+  void fetch(`/api/jobs/${encodeURIComponent(runId)}/cancel`, { method: "POST", headers: accessHeaders() }).catch(() => {});
+}
+/** The Chat for a Conversation. It reads on across a Research job's response windows by itself. */
+function createChat(id: string, messages: ScoutMessage[], chats: Chats) {
+  const chat: Chat<ScoutMessage> = new Chat<ScoutMessage>({
+    id,
+    messages,
+    transport: new JobChatTransport({
+      api: "/api/chat",
+      headers: () => accessHeaders(),
+      prepareSendMessagesRequest: ({ id, messages, body }) => ({
+        body: {
+          ...body,
+          id,
+          messages: requestTurns(messages),
+        },
+      }),
+      runId: () => jobOf(id, chat),
+      // The server keeps a job's stream for a day; after that the Answer is gone.
+      onGone: () => setTimeout(() => {
+        foundJobs.delete(id);
+        chat.messages = withJobEnd(chat.messages, "expired");
+      }),
+    }),
+    onError: (error) => {
+      const runId = jobOf(id, chat);
+      if (runId && !jobErrorShown(error, runId)) retryLater(id, chat, chats);
+    },
+    onFinish: ({ isError }) => {
+      if (lastJob(chat.messages)) foundJobs.delete(id);
+      if (!isError) retries.delete(chat);
+    },
+  });
+  return chat;
+}
 function AccessGate({ onUnlock }: { onUnlock: (code: string) => Promise<boolean> }) {
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
@@ -325,7 +419,8 @@ export default function Home() {
               )
               .slice(0, 30),
             drafts,
-          ),
+            // A Research job still writing an Answer reconnects when its Conversation opens.
+          ).map((t: LocalThread) => ({ ...t, activeRunId: activeRunId(t.messages) })),
         );
       }
     } catch {
@@ -373,6 +468,7 @@ export default function Home() {
       parts: m.parts.map((p) => (p.type === "file" ? { ...p, url: historyPhotoUrl(p.url) } : p)),
     }));
     const updatedAt = Date.now();
+    const runId = activeRunId(messages);
     // An answer still being written saves as a draft; the history is written when it starts and ends.
     if (running && !started) {
       drafts = { ...drafts, [id]: { updatedAt, messages: stored } };
@@ -380,28 +476,51 @@ export default function Home() {
       return;
     }
     setThreads((prev) => {
-      const thread = { id, title, messages: stored, updatedAt };
-      // Starting an answer moves its conversation to the top; more of an answer keeps it in place.
-      if (!started && prev.some((t) => t.id === id)) return prev.map((t) => (t.id === id ? thread : t));
+      const thread: LocalThread = { id, title, messages: stored, updatedAt, ...(runId && { activeRunId: runId }) };
+      // Starting an answer (a question or Try again) moves its conversation to the top; more of an
+      // answer, or reconnecting to its Research job, keeps it in place.
+      const starts = started && messages.at(-1)?.role === "user";
+      if (!starts && prev.some((t) => t.id === id)) return prev.map((t) => (t.id === id ? thread : t));
       return [thread, ...prev.filter((t) => t.id !== id)].slice(0, 30);
     });
   }, []);
   // Each conversation's Chat lives here, not in its view, so answers keep running
   // when another conversation is on screen.
   const [chats] = useState(() => createChatRegistry<ScoutMessage, Chat<ScoutMessage>>({ save: saveThread }));
-  const running = useSyncExternalStore(chats.subscribe, chats.running, chats.running);
+  const chatsRunning = useSyncExternalStore(chats.subscribe, chats.running, chats.running);
+  // A Conversation whose Research job still runs shows as answering, also before its Chat reconnects.
+  const running = useMemo(() => {
+    const jobs = threads.filter((t) => t.activeRunId && !chatsRunning.includes(t.id)).map((t) => t.id);
+    return jobs.length ? [...chatsRunning, ...jobs] : chatsRunning;
+  }, [chatsRunning, threads]);
   useEffect(() => {
     // A reload or a closed app ends every running answer; keep what each has written.
+    // A Research job goes on without it.
     const keep = () => flushSync(() => chats.flush());
     const hidden = () => document.visibilityState === "hidden" && keep();
+    // Back on screen, resumed by Android, or back online: every Research job's Answer reconnects.
+    const wake = () => {
+      if (document.visibilityState !== "visible") return;
+      for (const [id, chat] of chats.entries()) void reconnect(id, chat, chats, true);
+    };
     window.addEventListener("pagehide", keep);
     document.addEventListener("visibilitychange", hidden);
+    document.addEventListener("visibilitychange", wake);
+    document.addEventListener("resume", wake);
+    window.addEventListener("online", wake);
     return () => {
       window.removeEventListener("pagehide", keep);
       document.removeEventListener("visibilitychange", hidden);
+      document.removeEventListener("visibilitychange", wake);
+      document.removeEventListener("resume", wake);
+      window.removeEventListener("online", wake);
     };
   }, [chats]);
   const removeThread = (thread: LocalThread) => {
+    // Deleting a Conversation stops its Research job too.
+    const chat = chats.entries().find(([id]) => id === thread.id)?.[1];
+    const runId = (chat && activeRunId(chat.messages)) || thread.activeRunId;
+    if (runId) cancelJob(runId);
     chats.remove(thread.id);
     setThreads((prev) => prev.filter((t) => t.id !== thread.id));
     if (activeId === thread.id) newChat();
@@ -439,7 +558,12 @@ export default function Home() {
     return false;
   }, []);
   const forgetAccess = async () => {
+    // Stopping a Research job needs the code, so every job is stopped before it is forgotten.
+    const stopping = chats.entries().filter(([, chat]) => activeRunId(chat.messages));
+    for (const [, chat] of stopping) cancelJob(activeRunId(chat.messages)!);
+    for (const t of threads) if (t.activeRunId && !chats.has(t.id)) cancelJob(t.activeRunId);
     chats.stopAll();
+    for (const [, chat] of stopping) chat.messages = withJobEnd(chat.messages, "stopped");
     rememberAccessCode("");
     setSettingsOpen(false);
     const data = await fetchConfig("");
@@ -841,35 +965,41 @@ function ChatWorkspace({
   const [readerSources, setReaderSources] = useState<ResearchSource[]>([]);
   const [copied, setCopied] = useState("");
   // The Chat outlives this view, so switching conversations leaves its answer running.
-  const [chat] = useState(() =>
-    chats.get(id, () =>
-      new Chat<ScoutMessage>({
-        id,
-        messages: initialMessages,
-        transport: new DefaultChatTransport({
-          api: "/api/chat",
-          headers: () => accessHeaders(),
-          prepareSendMessagesRequest: ({ messages, body }) => ({
-            body: {
-              ...body,
-              messages: requestTurns(messages),
-            },
-          }),
-        }),
-      }),
-    ),
-  );
-  const { messages, sendMessage, regenerate, status, stop, error, clearError } =
+  const [chat] = useState(() => chats.get(id, () => createChat(id, initialMessages, chats)));
+  const { messages, sendMessage, regenerate, status, stop, error, clearError, setMessages } =
     useChat<ScoutMessage>({ chat });
-  const busy = status === "submitted" || status === "streaming";
+  // A Research job keeps writing the Answer while the connection to it is lost, so it still runs.
+  const runId = activeRunId(messages);
+  const job = lastJob(messages);
+  const streaming = status === "submitted" || status === "streaming";
+  const busy = streaming || !!runId;
+  const reconnectingToJob = !!runId && status !== "streaming";
   const requestBody = { webEnabled, preview, engine };
   const sentInitial = useRef(false);
   useEffect(() => chats.show(id), [chats, id]);
+  // Opening a Conversation whose Research job is still running reads its Answer again.
+  useEffect(() => {
+    void reconnect(id, chat, chats, false);
+  }, [id, chat, chats]);
+  // An Answer cut off mid-research on a device that never got its job id: the server may know it.
+  const lookedUp = useRef(false);
+  useEffect(() => {
+    if (!config.durable || lookedUp.current || isBusy(chat.status) || activeRunId(chat.messages) || !mayHaveLostJob(chat.messages)) return;
+    lookedUp.current = true;
+    void fetch(`/api/chats/${encodeURIComponent(id)}/job`, { headers: accessHeaders() })
+      .then((response) => (response.ok ? (response.json() as Promise<{ runId?: string | null }>) : undefined))
+      .then((found) => {
+        if (!found?.runId) return;
+        foundJobs.set(id, found.runId);
+        void reconnect(id, chat, chats, false);
+      })
+      .catch(() => {});
+  }, [config.durable, id, chat, chats]);
   const submit = useCallback(
     async (text: string, options: { webEnabled?: boolean; files?: FileUIPart[] } = {}) => {
       const clean = text.trim();
       const attached = (options.files ?? []).slice(0, MAX_PHOTOS);
-      if ((!clean && !attached.length) || chat.status === "submitted" || chat.status === "streaming") return;
+      if ((!clean && !attached.length) || isBusy(chat.status) || activeRunId(chat.messages)) return;
       let files: FileUIPart[];
       try {
         files = await Promise.all(attached.map(preparePhoto));
@@ -938,7 +1068,7 @@ function ChatWorkspace({
               throw new Error(
                 "A question between 1 and 6000 characters is required.",
               );
-            if (chat.status === "submitted" || chat.status === "streaming")
+            if (isBusy(chat.status) || activeRunId(chat.messages))
               throw new Error("A research task is already running.");
             if (!webAvailable)
               throw new Error("Web research is not connected yet.");
@@ -1063,9 +1193,13 @@ function ChatWorkspace({
         <ComposerSend
           busy={busy}
           hasText={!!input.trim()}
-          status={status}
+          status={busy && !streaming ? "streaming" : status}
           onStop={() => {
+            // Stop ends the Research job on the server, then the Chat's own read of it.
+            const stopping = activeRunId(chat.messages);
+            if (stopping) cancelJob(stopping);
             void stop();
+            if (stopping) setMessages((current) => withJobEnd(current, "stopped"));
             toast("Stopped");
           }}
         />
@@ -1265,14 +1399,32 @@ function ChatWorkspace({
                     </Message>
                   );
                 })}
-                {status === "submitted" && (
+                {status === "submitted" && !reconnectingToJob && (
                   <div className="progress-strip">
                     <LoaderCircle size={17} className="spin" />
                     {preview || config.demo ? "Opening a sample answer…" : "Thinking…"}
                     <Elapsed after={3} className="progress-time" />
                   </div>
                 )}
-                {error && (
+                {reconnectingToJob && !jobErrorShown(error, runId) && (
+                  <div className="progress-strip" role="status">
+                    <LoaderCircle size={17} className="spin" />
+                    Scout is still researching. Reconnecting…
+                  </div>
+                )}
+                {!busy && job?.end === "expired" && (
+                  <div className="error-banner" role="alert">
+                    This answer is no longer available. Scout keeps research for a day.
+                    <Button
+                      variant="ghost"
+                      className="mt-2"
+                      onClick={() => void regenerate({ body: requestBody })}
+                    >
+                      Try again
+                    </Button>
+                  </div>
+                )}
+                {error && jobErrorShown(error, runId) && (
                   <div className="error-banner" role="alert">
                     {error.message ||
                       "The request could not be completed. Please try again."}

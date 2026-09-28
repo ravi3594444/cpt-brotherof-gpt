@@ -4,6 +4,8 @@ minimumReleaseAgeIgnoreMissingTime: false
 trustLockfile: false
 strictDepBuilds: true
 allowBuilds:
+  '@swc/core': false
+  cbor-extract: false
   esbuild: true
   fsevents: true
   sharp: true
@@ -19,3 +21,4 @@ verifyDepsBeforeRun: false
 optimisticRepeatInstall: false
 overrides:
   miniflare>sharp: 0.35.4
+  workflow>@workflow/nest: '-'
