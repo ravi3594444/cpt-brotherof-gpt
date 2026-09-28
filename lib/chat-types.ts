@@ -23,10 +23,12 @@ export type ResearchData = {
  */
 export type ResearchJob = { id?: string; end?: "done" | "stopped" | "failed" | "expired" };
 export type ScoutMessage = UIMessage<
-  // thinkingMs: how long the Answer model's finished thoughts took in all.
-  { demo?: boolean; thinkingMs?: number; job?: ResearchJob },
-  // job: where a response's chunks sit in the job's stream (a transient part, never saved).
-  { research: ResearchData; suggestions: string[]; job: { id: string; index: number } }
+  // thinkingMs: how long the Answer model's finished thoughts took in all. writer: with a research
+  // writer connected, the model that wrote the Answer from the Research.
+  { demo?: boolean; thinkingMs?: number; job?: ResearchJob; writer?: string },
+  // job: where a response's chunks sit in the job's stream (a transient part, never saved), and
+  // the index of the last chunk the stream had when the response opened.
+  { research: ResearchData; suggestions: string[]; job: { id: string; index: number; tail?: number } }
 >;
 export type ScoutConfig = {
   // "required" hides the workspace until the right access code is sent.

@@ -51,7 +51,7 @@ const kernelFetch = async (url, init) => {
   assert.equal(init.headers.Authorization, "Bearer kernel-test-key");
   if (init.method === "DELETE") return Response.json({});
   if (url.endsWith("/browsers")) return Response.json({ session_id: "session-12345678" });
-  assert.match(JSON.parse(init.body).code, /return out/);
+  assert.match(JSON.parse(init.body).code, /return { pages, unrelated };/);
   return Response.json({
     success: true,
     result: [{ title: "A page", url: "https://example.com/article", content: "The page text", read: true }],

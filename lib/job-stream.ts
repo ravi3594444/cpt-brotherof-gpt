@@ -72,10 +72,17 @@ export function stepWriter(writable: WritableStream<Chunk>, { attempt, marker }:
 }
 export type StepWriter = ReturnType<typeof stepWriter>;
 
-/** The chunks an Answer started with, compacted before a job re-sends them: fewer and whole. */
+/**
+ * The chunks an Answer started with, compacted before a job re-sends them: fewer and whole. A reset
+ * drops what its step streamed before it (everything, without a step start), as the app does.
+ */
 export function compactChunks(chunks: Chunk[]): Chunk[] {
   const out: Chunk[] = [];
   for (const chunk of chunks) {
+    if (chunk.type === "reset-step") {
+      out.splice(out.findLastIndex((c) => c.type === "start-step") + 1);
+      continue;
+    }
     const last = out.at(-1);
     if ((chunk.type === "text-delta" || chunk.type === "reasoning-delta") && last?.type === chunk.type && last.id === chunk.id) {
       out[out.length - 1] = { ...last, delta: last.delta + chunk.delta };
@@ -94,8 +101,12 @@ export function compactChunks(chunks: Chunk[]): Chunk[] {
   return out;
 }
 
-/** A transient chunk that tells the client where the chunks after it sit in the job's stream. */
-export const jobPlace = (id: string, index: number): Chunk => ({ type: "data-job", data: { id, index }, transient: true });
+/**
+ * A transient chunk that tells the client where the chunks after it sit in the job's stream, and
+ * the last chunk's index when it knows it, so a replay can tell when it has caught up.
+ */
+export const jobPlace = (id: string, index: number, tail?: number): Chunk =>
+  ({ type: "data-job", data: { id, index, ...(tail !== undefined && { tail }) }, transient: true });
 
 /**
  * Skips the first `count` chunks of a job's stream, which the client already has, unless a retry of

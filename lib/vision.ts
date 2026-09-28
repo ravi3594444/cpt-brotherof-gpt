@@ -19,6 +19,9 @@ export function visionService(env: {
   return { baseURL, apiKey, model: env.model };
 }
 
+/** The vision model replied with no text, as when it spent its whole reply thinking. */
+export class EmptyReplyError extends ResearchError {}
+
 /** One OpenAI-compatible chat completion from the vision model; returns its reply text. */
 export async function visionChat(
   service: VisionService,
@@ -39,7 +42,7 @@ export async function visionChat(
     "The vision model",
   );
   const text = reply.choices?.[0]?.message?.content?.trim();
-  if (!text) throw new ResearchError("The vision model returned an empty reply. Try again.");
+  if (!text) throw new EmptyReplyError("The vision model returned an empty reply. Try again.");
   return text;
 }
 

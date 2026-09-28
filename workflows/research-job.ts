@@ -2,6 +2,7 @@ import { createHook } from "workflow";
 import type { AnswerState } from "../lib/answer.ts";
 import { jobToken } from "../lib/job-stream.ts";
 import type { ResearchJobInput } from "../lib/research-job.ts";
+import { researchTask, type ResearchTask } from "../lib/research.ts";
 import {
   answerStep,
   chooseAgain,
@@ -37,7 +38,7 @@ export async function researchJob(input: ResearchJobInput) {
     // A conflict whose owner is unknown: the request already stopped the Conversation's last job.
   }
   let turn: Turn = { mode: input.handoff.mode, calls: input.handoff.calls, responseMessages: input.handoff.responseMessages };
-  let task = input.handoff.task;
+  let task = researchTask(input.handoff);
   let { state, engine } = await openJob(input);
   // A second round only after a failure the Answer model may retry, with an engine not tried yet.
   const tried: string[] = [];
@@ -47,12 +48,12 @@ export async function researchJob(input: ResearchJobInput) {
     const next = await answerStep(input, turn, researched.state, researched.result, round);
     if (!next) return;
     turn = { ...turn, calls: next.calls, responseMessages: next.responseMessages };
-    task = next.task;
+    task = researchTask(next);
     ({ state, engine } = await chooseAgain(input, next.state, task, tried));
   }
 }
 
-async function research(input: ResearchJobInput, state: AnswerState, engine: string, task: string): Promise<Researched> {
+async function research(input: ResearchJobInput, state: AnswerState, engine: string, task: ResearchTask): Promise<Researched> {
   if (engine === "browser_use") {
     const started = await startBrowserUse(input, state, task);
     if ("result" in started) return started;

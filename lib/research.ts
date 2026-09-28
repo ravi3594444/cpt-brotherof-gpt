@@ -9,6 +9,26 @@ export class ResearchError extends Error {
 }
 /** HTTP statuses that repeat when asked again within seconds: a rejected key, no credit, or a limit. */
 export const repeats = (status: number) => [401, 402, 403, 429].includes(status);
+
+/** How far Research goes: "quick" reads a few pages; "deep" is for thorough research the user asked for. */
+export type ResearchDepth = "quick" | "deep";
+/** What the Answer model asked the Research tool for: the task, a short search query, and the depth. */
+export type ResearchTask = { task: string; query: string; depth: ResearchDepth };
+/** A Research task as given: plain text, or the tool's input, which a provider may leave fields out of. */
+export type ResearchInput = string | { task: string; query?: unknown; depth?: unknown };
+const words = (text: string, most: number) => text.trim().split(/\s+/).slice(0, most).join(" ");
+/** A depth as given: "deep" in any case, or else quick. */
+export const researchDepth = (value: unknown): ResearchDepth =>
+  typeof value === "string" && value.trim().toLowerCase() === "deep" ? "deep" : "quick";
+/**
+ * A Research task with its fallbacks: without a query, the task's first 12 words; without a known
+ * depth, quick. A query is at most 16 words, so the engines never search with a whole sentence.
+ */
+export function researchTask(input: ResearchInput): ResearchTask {
+  const { task, query, depth } = typeof input === "string" ? { task: input } : input;
+  const given = typeof query === "string" ? words(query, 16).slice(0, 200) : "";
+  return { task, query: given || words(task, 12), depth: researchDepth(depth) };
+}
 export function publicUrl(value: string): string | undefined {
   try {
     const u = new URL(value);
@@ -42,15 +62,16 @@ async function requestTavily(
   key: string,
   body: unknown,
   signal: AbortSignal,
+  { fetcher = fetch, timeoutMs = 25000 }: { fetcher?: typeof fetch; timeoutMs?: number } = {},
 ) {
-  const response = await fetch(`https://api.tavily.com/${path}`, {
+  const response = await fetcher(`https://api.tavily.com/${path}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(25000)]),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
   });
   if (!response.ok)
     throw new ResearchError(
@@ -75,18 +96,20 @@ export async function searchWeb(
   query: string,
   key: string,
   signal: AbortSignal,
+  { depth = "advanced", ...request }: { depth?: "basic" | "advanced"; fetcher?: typeof fetch; timeoutMs?: number } = {},
 ): Promise<ResearchSource[]> {
   const result = await requestTavily(
     "search",
     key,
     {
       query: query.slice(0, 400),
-      search_depth: "advanced",
+      search_depth: depth,
       max_results: 5,
       include_answer: false,
       include_raw_content: false,
     },
     signal,
+    request,
   );
   return (result.results || [])
     .filter((s) => publicUrl(s.url))
@@ -95,6 +118,30 @@ export async function searchWeb(
       url: publicUrl(s.url)!,
       content: (s.content || "").slice(0, 3500),
     }));
+}
+/**
+ * The pages a Search API search finds for a browser to read, with their snippets. Search engines
+ * block cloud browsers or send them unrelated results, so a search API finds the pages when one is
+ * connected. None when the search fails: the browser then searches by itself.
+ */
+export async function findPages(
+  query: string,
+  key: string,
+  signal: AbortSignal,
+  fetcher: typeof fetch = fetch,
+  progress?: (step: string) => void,
+): Promise<ResearchSource[]> {
+  if (!key) return [];
+  try {
+    // A basic search is the fastest (well under a second) and costs one credit.
+    const found = await searchWeb(query, key, signal, { depth: "basic", fetcher, timeoutMs: 8000 });
+    if (!found.length) progress?.("Search API found no pages; the browser searches instead");
+    return found;
+  } catch (error) {
+    if (!signal.aborted)
+      progress?.(`Search API failed (${error instanceof Error ? error.message : "no answer"}); the browser searches instead`);
+    return [];
+  }
 }
 export async function readPages(
   sources: ResearchSource[],

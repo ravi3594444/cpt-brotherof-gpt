@@ -105,7 +105,11 @@ test("in durable mode a research call hands the rest of the turn to the job, wit
   assert.equal(model.doStreamCalls.length, 1);
   assert.equal(handoff.mode, "tool");
   assert.equal(handoff.task, "Ferns that suit a shady balcony");
-  assert.deepEqual(handoff.calls, [{ toolCallId: "call-0", task: "Ferns that suit a shady balcony" }]);
+  assert.deepEqual(handoff.calls, [
+    { toolCallId: "call-0", task: "Ferns that suit a shady balcony", query: "Ferns that suit a shady balcony", depth: "quick" },
+  ]);
+  assert.equal(handoff.query, "Ferns that suit a shady balcony");
+  assert.equal(handoff.depth, "quick");
   assert.deepEqual(handoff.responseMessages.map((m) => m.role), ["assistant"]);
   assert.ok(handoff.responseMessages[0].content.some((p) => p.type === "tool-call" && p.toolCallId === "call-0"));
   // The request streamed the thinking and the start of research, and no finish: the job writes that.
@@ -120,6 +124,21 @@ test("in durable mode a research call hands the rest of the turn to the job, wit
   assert.deepEqual(handoff.state.data, data);
 });
 
+test("in durable mode a call with a null query or an unexpected depth is still handed to the job", async () => {
+  const model = mockModel([{
+    stream: convertArrayToReadableStream([
+      { type: "tool-call", toolCallId: "call-0", toolName: "web_research", input: JSON.stringify({ task: "Shade ferns", query: null, depth: "Deep" }) },
+      { type: "tool-call", toolCallId: "call-1", toolName: "web_research", input: JSON.stringify({ task: "Sun ferns", depth: "thorough" }) },
+      finish("tool-calls"),
+    ]),
+  }]);
+  const { handoff } = await request({ model });
+  assert.deepEqual(handoff.calls, [
+    { toolCallId: "call-0", task: "Shade ferns", query: "Shade ferns", depth: "deep" },
+    { toolCallId: "call-1", task: "Sun ferns", query: "Sun ferns", depth: "quick" },
+  ]);
+});
+
 test("in durable mode a message that needs no research is answered in the request and never handed off", async () => {
   const model = mockModel([reply("Hi! ", "How can I help?")]);
   const { parts, handoff } = await request({ model, question: "hi" });
@@ -129,15 +148,19 @@ test("in durable mode a message that needs no research is answered in the reques
   assert.ok(!parts.some((p) => p.type === "data-research"));
 });
 
-test("text before the research call is closed at the hand-off, and the job's answer continues after a blank line", async () => {
+test("text before the research call moves into Thinking at the hand-off, and the job's answer starts clean", async () => {
   const { parts, handoff } = await request({ model: mockModel([callsResearch(["ferns"], { before: "Let me look that up." })]) });
-  assert.deepEqual(parts.filter((p) => p.type.startsWith("text-")).map((p) => p.type), ["text-start", "text-delta", "text-end"]);
+  const reset = parts.findIndex((p) => p.type === "reset-step");
+  assert.ok(reset > 0, "the words that streamed are taken back");
+  assert.ok(!parts.slice(reset).some((p) => p.type.startsWith("text-")));
+  assert.deepEqual(parts.slice(reset).filter((p) => p.type === "reasoning-delta").map((p) => p.delta), ["Let me look that up."]);
+  assert.equal(handoff.state.written, "");
   const model = mockModel([reply("Most ferns like shade [1](https://ferns.example/care).")]);
   const job = await jobAnswer({ handoff, model, result: { finding: { sources, engine: "kernel" } } });
   assert.equal(job.next, undefined);
   assert.deepEqual(job.parts.filter((p) => p.type.startsWith("text-")).map((p) => [p.type, p.id]),
     [["text-start", "answer-1"], ["text-delta", "answer-1"], ["text-end", "answer-1"]]);
-  assert.equal(answerText(job.parts), "\n\nMost ferns like shade [1](https://ferns.example/care).");
+  assert.equal(answerText(job.parts), "Most ferns like shade [1](https://ferns.example/care).");
 });
 
 test("the job's answer step gives the model the evidence for its call and cannot research again after success", async () => {
@@ -157,7 +180,7 @@ test("the job's answer step gives the model the evidence for its call and cannot
   const data = researchData(parts);
   assert.equal(data.phase, "complete");
   assert.equal(data.engine, "kernel");
-  assert.equal(data.steps.at(-1), "Atria is writing an answer from the sources");
+  assert.equal(data.steps.at(-1), "Atria is writing the answer from the sources");
   assert.deepEqual(parts.filter((p) => p.type === "source-url").map((p) => p.url), sources.map((s) => s.url));
   assert.deepEqual(parts.at(-1), { type: "finish", finishReason: "stop" });
 });
@@ -185,7 +208,7 @@ test("in the job a quick failure may be retried once, with no time limit, and th
   assert.equal("secondsLeft" in failure, false, "a Research job has no ceiling to count down to");
   assert.deepEqual(retryModel.doStreamCalls[0].toolChoice, { type: "auto" });
   assert.equal(first.next.task, "linen shirts on shein.com");
-  assert.deepEqual(first.next.calls, [{ toolCallId: "call-0", task: "linen shirts on shein.com" }]);
+  assert.deepEqual(first.next.calls, [{ toolCallId: "call-0", task: "linen shirts on shein.com", query: "linen shirts on shein.com", depth: "quick" }]);
   assert.deepEqual(first.next.responseMessages.map((m) => m.role), ["assistant", "tool", "assistant"]);
   assert.ok(!first.parts.some((p) => p.type === "finish"));
   const retried = researchData(first.parts);

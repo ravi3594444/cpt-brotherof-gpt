@@ -35,10 +35,11 @@ Put these values in the host's secret environment, not in the app bundle:
 | `KERNEL_API_KEY` | Kernel cloud browser sessions and Playwright execution |
 | `AIMLAPI_API_KEY` | Optional JEV routing between the two browser services, through AI/ML API (`typesafe/jev`) |
 | `TYPESAFE_API_KEY` | The same JEV routing straight from TypeSafe (used only when `AIMLAPI_API_KEY` is not set) |
-| `TAVILY_API_KEY` | Optional legacy search/extraction fallback |
-| `VISION_MODEL_ID` | Optional model that can see, e.g. `deepseek/deepseek-v4.1-flash` on AI/ML API. It describes photos for a text-only answer model (such as Atria Dawn Preview) and drives the Vision agent's browser |
+| `TAVILY_API_KEY` | Recommended. Tavily Search API (free monthly credits): finds the pages Kernel and the Vision agent read, since search engines block cloud browsers or send them unrelated results. Without a browser key it is the research engine |
+| `VISION_MODEL_ID` | Optional model that can see, e.g. `deepseek/deepseek-v4.1-flash` on AI/ML API. It describes photos for a text-only answer model (such as Atria Dawn Preview), drives the Vision agent's browser, and writes the answer after research |
 | `VISION_MODEL_BASE_URL` | OpenAI-compatible address of the vision model; defaults to `https://api.aimlapi.com/v1` |
 | `VISION_MODEL_API_KEY` | Key for the vision model; defaults to `AIMLAPI_API_KEY` |
+| `RESEARCH_WRITER` | Optional. `answer` keeps the answer model as the writer of answers after research; by default the vision model writes them, since it is much faster |
 | `SCOUT_ACCESS_CODE` | Optional. When set, the app and API ask for this code, so strangers who find the site cannot spend your credit |
 | `RESEARCH_MAX_COST_USD` | Optional money cap for one research's Browser Use run, in US dollars (default 2). A Research job has no time limit, so this cap and Stop are what end a run that never finishes |
 | `SCOUT_DURABLE_RESEARCH` | Optional. `off` keeps research inside the chat request, with its 200-second budget, even on Vercel |
@@ -48,6 +49,12 @@ the Web chip on, the answer model gets a `web_research` tool and decides for
 itself when to use it: when you ask it to research, find, look up, compare or
 check something, or when a good answer needs current facts. A greeting,
 writing, math or code gets a direct reply with no research and no citations.
+The tool takes the task, a short search query the engines start with (never
+the whole task sentence), and a depth: quick, the default, when a few pages
+are enough, or deep when you ask for thorough, comprehensive or detailed
+research, or for many sources or sites. Anything the model writes before it
+calls the tool ("I'll research…") moves into the Thinking row, so the answer
+holds only what it wrote after research.
 The answer model should support OpenAI-style tool calling. If the provider
 rejects tools, Scout asks the model in plain text whether to research (one
 word, RESEARCH or ANSWER) and then researches or answers directly.
@@ -58,11 +65,13 @@ the chat request and is as fast as before. When the answer model calls
 `web_research`, the rest of the turn moves into a job: the research, split
 into steps of a few minutes each, then the answer, written in a step of its
 own. A job has no time limit. Browser Use can browse for as long as the task
-needs (up to its own 4-hour session), and the Vision agent can take up to 60
-steps. Only `RESEARCH_MAX_COST_USD`, Stop, and a guard against runs that never
+needs (up to its own 4-hour session), and the Vision agent can take up to 10
+steps for quick research and 40 for deep. Only `RESEARCH_MAX_COST_USD`, Stop, and a guard against runs that never
 end (60 Browser Use windows, about 4 hours) stop it early. The job keeps going
-when the app is closed, the phone locks or the connection drops; the app reads
-the answer again when it comes back, and it survives a reload. Vercel keeps a
+when the app is closed, the phone locks or the connection drops. When the
+connection comes back, the app reads on from where it was, so the answer on
+screen never restarts or jumps; after a reload it reads the answer again.
+Vercel keeps a
 finished job for one day on Hobby, so an answer left unopened longer than that
 is gone and Scout says so. A typical job uses about 20 to 40 of Hobby's 50,000
 workflow events a month. Research jobs need Vercel (or `next dev` and
@@ -83,10 +92,21 @@ rate limit); the model is told why research failed and whether it may
 retry, and never promises a search it is not making. With
 Kernel and a vision model connected, the **Vision agent** engine lets the vision
 model drive a real Kernel browser (open, click, type into search boxes, scroll,
-read) for up to 8 steps while the answer model only writes the reply. JEV can
-choose it in Auto. For Atria Dawn Preview, use `MODEL_BASE_URL=https://api.atria-asi.ai/v1`
+read) for up to 8 steps (16 for deep research). It stops by itself once it has
+read 3 pages (6 for deep); a reply with no action is asked once more, shorter,
+and if the model still says nothing, or a model reply or browser step fails, it
+ends with the pages it read. JEV can
+choose it in Auto. Kernel's own script reads its pages side by side, so four
+pages take about as long as the slowest one.
+
+For Atria Dawn Preview, use `MODEL_BASE_URL=https://api.atria-asi.ai/v1`
 and `MODEL_ID=Atria-Dawn-Preview`; Atria reads text only, so set a vision model
-for photos. Atria is a reasoning model: it thinks before its first word. Scout
+for photos. With a vision model set, the vision model also writes the answer
+after research, from the same sources and with the same rules, because a
+reasoning model like Atria can think for minutes over them first; Atria still
+answers directly and decides when to research. Set `RESEARCH_WRITER=answer` to
+keep Atria as the writer. If the vision model fails before its first word,
+Atria writes the answer. Atria is a reasoning model: it thinks before its first word. Scout
 shows that thinking as a collapsed "Thinking…" row above the answer, and lets
 each answer use up to 16,000 output tokens, since thinking counts against the
 limit on most providers (Atria accepts up to 65,536). A model whose output cap
@@ -95,12 +115,19 @@ reasoning model whose chat template opens the `<think>` block itself (DeepSeek
 R1 or QwQ on vLLM or SGLang), start the server with its reasoning parser so the
 thinking arrives as `reasoning_content`; otherwise it shows in the answer. The two
 browser keys together enable engine choice in the chat. In Auto, Kernel does
-most research: the Vision agent for browsing, plain Kernel for reading links,
-and Browser Use Cloud only when JEV is at least 65% sure a task needs its
-heavier agent. When JEV is unsure or unavailable, or without a JEV key, Auto
-uses the Vision agent, then Kernel, then Browser Use Cloud. A second research
-for the same answer, after the first failed, tries an engine not used yet, with
-Browser Use Cloud as the backup. JEV is optional and only selects the path in
+most research: plain Kernel, the fastest, for questions a few pages answer
+(facts, explanations, how things work, news, reviews, comparisons), the Vision
+agent for using a site like a person (searching inside it, filters, product
+listings and prices, pictures, charts), and Browser Use Cloud only when JEV is
+at least 65% sure a task needs its heavier agent. When JEV is unavailable, or
+without a JEV key, Auto uses Kernel, then the Vision agent, then Browser Use
+Cloud for quick research, and the Vision agent first for deep research; an
+unsure Kernel choice stays Kernel for quick research and becomes the Vision
+agent for deep. When JEV fails, the research steps say why ("JEV was
+unavailable (HTTP 402); using Kernel", or timed out, network error, unexpected
+answer), and the server log has the status and the start of the response. A
+second research for the same answer, after the first failed, tries an engine
+not used yet, with Browser Use Cloud as the backup. JEV is optional and only selects the path in
 Auto mode. It does not browse, answer, or run locally
 on Android. The current private preview already has its answer model
 configured; its browser services still need keys. Never commit real keys or
@@ -194,7 +221,10 @@ does not simulate those native permissions.
 Mocked adapter tests verify Browser Use run parsing (including prose around
 JSON), polling to the research deadline on a fake clock, partial results
 from run events, cancelled runs and stopped browsers, Kernel and vision
-agent time limits, the minimum time before a paid browser opens, the
+agent time limits, research depth and search queries, Kernel's parallel page
+reading (run against a fake browser), the vision agent's page targets and
+empty replies, the research writer and its fallback, narration moved into
+Thinking, the minimum time before a paid browser opens, the
 one-retry research policy and failures that are not retried,
 image/source validation,
 Kernel session cleanup, engine choice and the

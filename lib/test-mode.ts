@@ -47,6 +47,11 @@ const thought = (id: string, text: string): StreamPart[] => [
   { type: "reasoning-delta", id, delta: text },
   { type: "reasoning-end", id },
 ];
+// An answer from sources goes on for about eight seconds, word by word, so the browser checks can
+// switch away, go offline and scroll while it streams.
+const MORE = Array.from({ length: 8 }, (_, i) =>
+  `Test detail ${i + 1}: ferns in the garden guide grow best in steady shade, with soil that stays damp but never wet, and they need very little care once settled.`,
+).join("\n\n");
 
 /** The reply the fake answer model gives for a prompt. */
 function reply(options: CallOptions): StreamPart[] {
@@ -61,13 +66,15 @@ function reply(options: CallOptions): StreamPart[] {
     const value = last.output?.value as { error?: string; sources?: unknown[] } | unknown[] | undefined;
     const sources = (Array.isArray(value) ? value : value?.sources) as Array<{ title: string; url: string }> | undefined;
     const text = sources?.length
-      ? `The test research found ${sources.length} ${sources.length === 1 ? "source" : "sources"}. The first is ${sources[0].title} [1](${sources[0].url}).`
+      ? `The test research found ${sources.length} ${sources.length === 1 ? "source" : "sources"}. The first is ${sources[0].title} [1](${sources[0].url}).\n\n${MORE}`
       : `The test research did not finish (${(value as { error?: string })?.error ?? "no sources"}), so this answer is not from sources.`;
     return [...thought("r", "Reading what the research found."), ...words("t", text), finish("stop")];
   }
   if (mayResearch && /research/i.test(question))
     return [
       ...thought("r", "The question asks for research."),
+      // Words before the call, as some models write them; Scout moves them into Thinking.
+      ...words("n", "I'll research that now."),
       { type: "tool-call", toolCallId: "test-call-1", toolName: "web_research", input: JSON.stringify({ task: question.slice(0, 2000) }) },
       finish("tool-calls"),
     ];
