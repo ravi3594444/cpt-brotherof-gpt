@@ -33,7 +33,9 @@ export async function openJobStream(runId: string, startIndex: number, window: W
   const run = getRun(runId);
   if (!(await run.exists)) return;
   const readable = run.getReadable<Chunk>({ startIndex });
-  return jobWindow(skipChunks(readable, 0, (index) => jobPlace(runId, startIndex + index)), { ...window, status: () => run.status });
+  // How far the stream had reached: a client replaying it holds the replay until it gets there.
+  const tail = await readable.getTailIndex().catch(() => undefined);
+  return jobWindow(skipChunks(readable, 0, (index) => jobPlace(runId, startIndex + index, tail)), { ...window, status: () => run.status });
 }
 
 /** Stops a job; returns its status afterwards, or undefined when there is no such job. */
