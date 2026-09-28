@@ -92,7 +92,8 @@ Kernel and a vision model connected, the **Vision agent** engine lets the vision
 model drive a real Kernel browser (open, click, type into search boxes, scroll,
 read) for up to 8 steps (16 for deep research). It stops by itself once it has
 read 3 pages (6 for deep); a reply with no action is asked once more, shorter,
-and if the model still says nothing it ends with the pages it read. JEV can
+and if the model still says nothing, or a model reply or browser step fails, it
+ends with the pages it read. JEV can
 choose it in Auto. Kernel's own script reads its pages side by side, so four
 pages take about as long as the slowest one.
 

@@ -75,6 +75,21 @@ test("research gets the model's query and depth, or the fallbacks when a provide
   assert.deepEqual(omitted.asked, [{ task: "Ferns that suit a shady balcony", query: "Ferns that suit a shady balcony", depth: "quick" }]);
 });
 
+test("a research call with a null query or an unexpected depth still researches, with the fallbacks", async () => {
+  const quick = { task: "Ferns for shade", query: "Ferns for shade", depth: "quick" };
+  for (const [input, expected] of [
+    [{ task: "Ferns for shade", query: null }, quick],
+    [{ task: "Ferns for shade", query: null, depth: null }, quick],
+    [{ task: "Ferns for shade", query: 42 }, quick],
+    [{ task: "Ferns for shade", depth: "thorough" }, quick],
+    [{ task: "Ferns for shade", query: "shade ferns", depth: "Deep" }, { ...quick, query: "shade ferns", depth: "deep" }],
+  ]) {
+    const { asked } = await research(input);
+    assert.deepEqual(asked, [expected], JSON.stringify(input));
+  }
+  assert.equal(researchTask({ task: "Ferns", depth: " DEEP " }).depth, "deep");
+});
+
 test("Browser Use Cloud gets the task with a line for its depth", async () => {
   const bodies = [];
   const fetcher = async (_url, init) => {

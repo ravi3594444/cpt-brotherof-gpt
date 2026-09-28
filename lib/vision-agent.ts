@@ -259,6 +259,7 @@ const MAX_KEPT = 6;
 // Room for the vision model to think before its one-line action.
 const STEP_TOKENS = 1200;
 const STALLED = "The vision model stopped replying; these are the pages it had read";
+const BROKE = "The vision agent stopped early after an error; these are the pages it had read.";
 
 /** Opens the Kernel browser the vision agent drives, and returns its session id. */
 export async function openVisionBrowser(
@@ -301,6 +302,8 @@ export type VisionAgentState = {
   finished: boolean;
   /** The vision model stopped replying, so the agent ended with what it had. */
   stalled?: boolean;
+  /** Why a model reply or browser step failed once the agent had a page to keep, so it ended with what it had. */
+  broken?: string;
   history: string[];
   kept: ResearchSource[];
 };
@@ -311,7 +314,9 @@ export function newVisionAgent(browserId: string, input: ResearchInput): VisionA
 
 /**
  * Runs the vision agent's turns in its browser until it finishes, takes `maxSteps` turns, or no
- * turn fits before `until`. Returns the page it is on; the screenshot stays here.
+ * turn fits before `until`. Returns the page it is on, once it has seen one; the screenshot stays
+ * here. A model reply or browser step that fails once the agent has a page to keep ends the browsing
+ * with what it has; a stop, the research budget, or a failure with nothing to keep ends it with the error.
  */
 async function takeTurns(
   agent: VisionAgentState,
@@ -322,7 +327,7 @@ async function takeTurns(
   fetcher: Fetcher,
   progress: Progress | undefined,
   { maxSteps, until, turnMs, clock }: { maxSteps: number; until: number; turnMs: number; clock: () => number },
-): Promise<PageObservation> {
+): Promise<PageObservation | undefined> {
   const step = async (input: { start?: string; action?: AgentAction }) => {
     const result = await jsonResponse<{ success?: boolean; result?: unknown }>(
       await fetcher(`${kernelBase}/${agent.browserId}/playwright/execute`, {
@@ -335,73 +340,86 @@ async function takeTurns(
     if (!result.success) throw new ResearchError("The browser could not carry out that step. Try again or choose another engine.");
     return observation(result.result);
   };
-  let page: PageObservation;
-  if (!agent.started) {
-    const direct = extractPublicUrls(agent.question)[0];
-    page = await step({
-      start: direct || `https://www.bing.com/search?q=${encodeURIComponent(agent.query.slice(0, 300))}`,
-    });
-    agent.started = true;
-    progress?.(direct ? "Vision agent opened the supplied page" : `Vision agent searched the web for “${agent.query}”`);
-  } else page = await step({});
-  // The model's reply, or "" when it replied with no text.
-  const ask = (short: boolean) =>
-    visionChat(keys.vision, prompt(agent, page, maxSteps, short), budget, fetcher, STEP_TOKENS)
-      .catch((error: unknown) => {
-        if (error instanceof EmptyReplyError) return "";
-        throw error;
+  let seen: PageObservation | undefined;
+  try {
+    let page: PageObservation;
+    if (!agent.started) {
+      const direct = extractPublicUrls(agent.question)[0];
+      page = await step({
+        start: direct || `https://www.bing.com/search?q=${encodeURIComponent(agent.query.slice(0, 300))}`,
       });
-  while (!agent.finished && !agent.stalled && agent.turns < maxSteps && clock() + turnMs < until) {
-    signal.throwIfAborted();
-    agent.turns++;
-    let reply = await ask(false);
-    let action = reply ? parseAgentAction(reply, page) : undefined;
-    if (!action) {
-      // Asked once more, shorter; a second empty reply ends the browsing with the pages kept.
-      reply = await ask(true);
-      action = reply ? parseAgentAction(reply, page) : undefined;
-      if (!reply) {
-        agent.stalled = true;
+      agent.started = true;
+      progress?.(direct ? "Vision agent opened the supplied page" : `Vision agent searched the web for “${agent.query}”`);
+    } else page = await step({});
+    seen = page;
+    // The model's reply, or "" when it replied with no text.
+    const ask = (short: boolean) =>
+      visionChat(keys.vision, prompt(agent, page, maxSteps, short), budget, fetcher, STEP_TOKENS)
+        .catch((error: unknown) => {
+          if (error instanceof EmptyReplyError) return "";
+          throw error;
+        });
+    while (!agent.finished && !agent.stalled && agent.turns < maxSteps && clock() + turnMs < until) {
+      signal.throwIfAborted();
+      agent.turns++;
+      let reply = await ask(false);
+      let action = reply ? parseAgentAction(reply, page) : undefined;
+      if (!action) {
+        // Asked once more, shorter; a second empty reply ends the browsing with the pages kept.
+        reply = await ask(true);
+        action = reply ? parseAgentAction(reply, page) : undefined;
+        if (!reply) {
+          agent.stalled = true;
+          break;
+        }
+      }
+      if (!action) {
+        agent.history.push("(a reply that was not an allowed action)");
+        continue;
+      }
+      if (action.action === "finish") {
+        agent.finished = true;
         break;
       }
+      if (action.action === "read") {
+        if (keepPage(agent, page)) progress?.(describe(action, page));
+        agent.history.push(describe(action, page));
+        // Enough pages for the depth: the agent is done.
+        if (agent.kept.length >= KEEP[agent.depth]) agent.finished = true;
+        continue;
+      }
+      const done = describe(action, page);
+      progress?.(done);
+      agent.history.push(done);
+      page = seen = await step({ action });
     }
-    if (!action) {
-      agent.history.push("(a reply that was not an allowed action)");
-      continue;
-    }
-    if (action.action === "finish") {
-      agent.finished = true;
-      break;
-    }
-    if (action.action === "read") {
-      if (keepPage(agent, page)) progress?.(describe(action, page));
-      agent.history.push(describe(action, page));
-      // Enough pages for the depth: the agent is done.
-      if (agent.kept.length >= KEEP[agent.depth]) agent.finished = true;
-      continue;
-    }
-    const done = describe(action, page);
-    progress?.(done);
-    agent.history.push(done);
-    page = await step({ action });
+  } catch (error) {
+    if (signal.aborted || budget.aborted || (!agent.kept.length && !(seen && asSource(seen)))) throw error;
+    agent.broken = error instanceof ResearchError ? error.message : "A model reply or browser step failed.";
   }
-  return page;
+  return seen;
 }
 
-/** Keeps a page the agent read as a Source; false for a search page or one with no text. */
-function keepPage(agent: VisionAgentState, p: PageObservation) {
+/** A page as a Source, or undefined for a search page or one with no text. */
+function asSource(p: PageObservation): ResearchSource | undefined {
   const url = publicUrl(p.url);
-  if (!url || isSearchPage(url) || !p.text.trim()) return false;
-  const known = agent.kept.findIndex((s) => s.url === url);
-  if (known < 0 && agent.kept.length >= MAX_KEPT) return false;
+  if (!url || isSearchPage(url) || !p.text.trim()) return;
   const image = p.image?.startsWith("https:") ? publicUrl(p.image) : undefined;
-  const source = {
+  return {
     url,
     title: p.title || new URL(url).hostname,
     content: p.text.slice(0, 6000),
     read: true,
     ...(image ? { image } : {}),
   };
+}
+
+/** Keeps a page the agent read as a Source; false for a search page or one with no text. */
+function keepPage(agent: VisionAgentState, p: PageObservation) {
+  const source = asSource(p);
+  if (!source) return false;
+  const known = agent.kept.findIndex((s) => s.url === source.url);
+  if (known < 0 && agent.kept.length >= MAX_KEPT) return false;
   if (known < 0) agent.kept.push(source);
   else agent.kept[known] = source;
   return true;
@@ -411,13 +429,15 @@ function keepPage(agent: VisionAgentState, p: PageObservation) {
 const keepLastPage = (agent: VisionAgentState, page: PageObservation) => !agent.kept.length && keepPage(agent, page);
 
 /** The Sources of an agent that is done, with a warning when it did not finish; throws with none. */
-function agentResult(agent: VisionAgentState, page: PageObservation, progress: Progress | undefined, unfinished: string) {
-  if (keepLastPage(agent, page)) progress?.(describe({ action: "read" }, page));
+function agentResult(agent: VisionAgentState, page: PageObservation | undefined, progress: Progress | undefined, unfinished: string) {
+  if (page && keepLastPage(agent, page)) progress?.(describe({ action: "read" }, page));
   if (!agent.kept.length)
     throw new ResearchError(agent.stalled
       ? "The vision model returned an empty reply. Try again."
       : "The vision agent did not reach a readable public page. Try a narrower question.");
-  const warning = agent.stalled ? STALLED : agent.finished ? undefined : unfinished;
+  const warning = agent.broken
+    ? `${BROKE} ${agent.broken}`
+    : agent.stalled ? STALLED : agent.finished ? undefined : unfinished;
   return { sources: agent.kept.slice(0, MAX_KEPT), ...(warning ? { warning } : {}) };
 }
 
@@ -461,11 +481,11 @@ export async function visionAgentResearch(
 }
 
 // A Research job's vision agent has no time limit, so it may take more turns, many more for deep
-// research; each batch of turns fits one step, and a turn (a model reply and a browser step) can take
-// up to 100 seconds.
+// research; each batch of turns fits one step, and a turn (a model reply, its shorter ask again, and a
+// browser step) can take up to 140 seconds.
 export const JOB_VISION_STEPS: Record<ResearchDepth, number> = { quick: 10, deep: 40 };
 export const VISION_BATCH_MS = 240_000;
-const TURN_MS = 100_000;
+const TURN_MS = 140_000;
 
 /**
  * One batch of a Research job's vision agent turns, in the browser `agent.browserId`. Returns the
@@ -485,7 +505,7 @@ export async function visionAgentBatch(
   const next = structuredClone(agent);
   try {
     const page = await takeTurns(next, keys, signal, signal, fetcher, progress, { maxSteps, until, turnMs, clock });
-    if (!next.finished && !next.stalled && next.turns < maxSteps) return { agent: next, done: false };
+    if (!next.finished && !next.stalled && !next.broken && next.turns < maxSteps) return { agent: next, done: false };
     return { agent: next, done: true, result: agentResult(next, page, progress, "Vision agent reached its step limit") };
   } catch (error) {
     if (signal.aborted) await closeVisionBrowser(agent.browserId, keys.kernelKey, fetcher);

@@ -141,6 +141,23 @@ test("the logged JEV response body is cut to about 300 characters", async () => 
   assert.ok(warned[0].length < 400, String(warned[0].length));
 });
 
+test("a key the JEV body echoes across the 300-character cut never reaches the log, not even in part", async () => {
+  const key = "sk-live-0123456789abcdef";
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (...args) => warned.push(args.join(" "));
+  try {
+    // The key starts 10 characters before the cut.
+    await choose("auto", { ...allKeys, jev: jevService({ aimlapiKey: key }) },
+      async () => new Response(`${"x".repeat(290)}${key} is not valid`, { status: 401 }));
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(warned.length, 1);
+  assert.ok(!warned[0].includes(key.slice(0, 10)), warned[0]);
+  assert.match(warned[0], /HTTP 401/);
+});
+
 test("the vision agent can be chosen directly, or by JEV in Auto", async () => {
   const withAgent = { ...allKeys, visionAgent: true };
   assert.deepEqual(await choose("vision_agent", withAgent), { engine: "vision_agent", steps: ["Selected Vision agent"] });

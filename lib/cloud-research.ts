@@ -614,8 +614,9 @@ export async function jevChooseEngine(
   };
   // Why JEV gave no usable answer goes into the step, and the cause into the server log.
   const unavailable = (why: string, detail: string) => {
-    const shown = detail.slice(0, 300);
-    console.warn(`JEV routing failed (${why}): ${service.key ? shown.replaceAll(service.key, "[key]") : shown}`);
+    // The key leaves the whole body before the cut, so no part of it is logged.
+    const shown = (service.key ? detail.replaceAll(service.key, "[key]") : detail).slice(0, 300);
+    console.warn(`JEV routing failed (${why}): ${shown}`);
     return pick(preferred, `unavailable (${why})`);
   };
   const timeout = AbortSignal.timeout(4500);

@@ -18,7 +18,7 @@ import { z } from "zod";
 import type { ResearchData, ResearchSource, ScoutMessage } from "./chat-types";
 import { textOnlyMessages } from "./conversation.ts";
 import { compactChunks, type Chunk } from "./job-stream.ts";
-import { ResearchError, researchTask, type ResearchInput, type ResearchTask } from "./research.ts";
+import { ResearchError, researchDepth, researchTask, type ResearchInput, type ResearchTask } from "./research.ts";
 
 // The live answer loop. With Search the web on, the Answer model gets the
 // Research tool and decides for itself whether a message needs Research.
@@ -367,10 +367,11 @@ const researchInput = z.object({
   task: z.string().min(1).max(2000).describe(
     "A self-contained research task in the user's language, including any links the user gave and the context needed from earlier messages.",
   ),
-  query: z.string().optional().describe(
+  // A provider may send null or another value for these; the call still runs, with researchTask's fallbacks.
+  query: z.string().optional().catch(undefined).describe(
     "A short web search query for the task, at most about 10 words, in the language that suits the task. The research engines search with it.",
   ),
-  depth: z.enum(["quick", "deep"]).default("quick").describe(
+  depth: z.enum(["quick", "deep"]).default("quick").catch(({ input }) => researchDepth(input)).describe(
     `"quick" (the default): a few relevant pages are enough. "deep": only when ${DEEP_WHEN}.`,
   ),
 });

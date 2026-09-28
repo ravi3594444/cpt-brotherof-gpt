@@ -124,6 +124,21 @@ test("in durable mode a research call hands the rest of the turn to the job, wit
   assert.deepEqual(handoff.state.data, data);
 });
 
+test("in durable mode a call with a null query or an unexpected depth is still handed to the job", async () => {
+  const model = mockModel([{
+    stream: convertArrayToReadableStream([
+      { type: "tool-call", toolCallId: "call-0", toolName: "web_research", input: JSON.stringify({ task: "Shade ferns", query: null, depth: "Deep" }) },
+      { type: "tool-call", toolCallId: "call-1", toolName: "web_research", input: JSON.stringify({ task: "Sun ferns", depth: "thorough" }) },
+      finish("tool-calls"),
+    ]),
+  }]);
+  const { handoff } = await request({ model });
+  assert.deepEqual(handoff.calls, [
+    { toolCallId: "call-0", task: "Shade ferns", query: "Shade ferns", depth: "deep" },
+    { toolCallId: "call-1", task: "Sun ferns", query: "Sun ferns", depth: "quick" },
+  ]);
+});
+
 test("in durable mode a message that needs no research is answered in the request and never handed off", async () => {
   const model = mockModel([reply("Hi! ", "How can I help?")]);
   const { parts, handoff } = await request({ model, question: "hi" });

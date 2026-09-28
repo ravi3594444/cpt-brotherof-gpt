@@ -17,6 +17,9 @@ export type ResearchTask = { task: string; query: string; depth: ResearchDepth }
 /** A Research task as given: plain text, or the tool's input, which a provider may leave fields out of. */
 export type ResearchInput = string | { task: string; query?: unknown; depth?: unknown };
 const words = (text: string, most: number) => text.trim().split(/\s+/).slice(0, most).join(" ");
+/** A depth as given: "deep" in any case, or else quick. */
+export const researchDepth = (value: unknown): ResearchDepth =>
+  typeof value === "string" && value.trim().toLowerCase() === "deep" ? "deep" : "quick";
 /**
  * A Research task with its fallbacks: without a query, the task's first 12 words; without a known
  * depth, quick. A query is at most 16 words, so the engines never search with a whole sentence.
@@ -24,7 +27,7 @@ const words = (text: string, most: number) => text.trim().split(/\s+/).slice(0, 
 export function researchTask(input: ResearchInput): ResearchTask {
   const { task, query, depth } = typeof input === "string" ? { task: input } : input;
   const given = typeof query === "string" ? words(query, 16).slice(0, 200) : "";
-  return { task, query: given || words(task, 12), depth: depth === "deep" ? "deep" : "quick" };
+  return { task, query: given || words(task, 12), depth: researchDepth(depth) };
 }
 export function publicUrl(value: string): string | undefined {
   try {

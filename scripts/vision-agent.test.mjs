@@ -51,11 +51,15 @@ function fakeServices(pages, replies) {
       }
       if (url.endsWith("/browsers")) return Response.json({ session_id: "session-12345678" });
       calls.kernel.push(JSON.parse(init.body).code);
-      return Response.json({ success: true, result: pages[Math.min(p++, pages.length - 1)] });
+      // null: a step Kernel could not carry out.
+      const next = pages[Math.min(p++, pages.length - 1)];
+      return Response.json(next === null ? { success: false, error: "Timeout 6000ms exceeded" } : { success: true, result: next });
     }
     calls.vision.push(JSON.parse(init.body));
     const reply = replies[Math.min(r++, replies.length - 1)];
     if (reply instanceof Error) throw reply;
+    // A number: the vision model's service answers with that HTTP status.
+    if (typeof reply === "number") return new Response("busy", { status: reply });
     return Response.json({ choices: [{ message: { content: reply, ...(!reply && { reasoning_content: "Thinking about the page" }) } }] });
   };
   return { fetcher, calls };
@@ -146,9 +150,16 @@ test("closing the browser is handed to the platform, so it finishes after the re
 });
 
 test("the cloud browser is closed even when the vision model fails", async () => {
-  const { fetcher, calls } = fakeServices([article], [new TypeError("network down")]);
-  await assert.rejects(() => visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, fetcher));
+  // On a search page, with nothing to keep, the failure fails the run.
+  const { fetcher, calls } = fakeServices([page], [new TypeError("network down")]);
+  await assert.rejects(() => visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, fetcher), /network down/);
   assert.equal(calls.deleted, true);
+  // On a readable page, the run ends with that page.
+  const onArticle = fakeServices([article], [new TypeError("network down")]);
+  const { sources, warning } = await visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, onArticle.fetcher);
+  assert.deepEqual(sources.map((s) => s.url), ["https://example.com/ferns"]);
+  assert.match(warning, /stopped early after an error/);
+  assert.equal(onArticle.calls.deleted, true);
 });
 
 test("an agent that never reaches a readable public page says so plainly", async () => {
@@ -250,4 +261,51 @@ test("an agent whose vision model stops replying before it read anything fails p
     (error) => error instanceof ResearchError && /empty reply/.test(error.message));
   assert.equal(calls.vision.length, 2);
   assert.equal(calls.deleted, true);
+});
+
+test("a vision model error after a page was kept ends the run with the pages kept", async () => {
+  const { fetcher, calls } = fakeServices([article], ['{"action":"read"}', 503]);
+  const { sources, warning } = await visionAgentResearch("How do I grow ferns?", { kernelKey: "k", vision }, signal, fetcher);
+  assert.deepEqual(sources.map((s) => s.url), ["https://example.com/ferns"]);
+  assert.match(warning, /stopped early after an error/);
+  assert.match(warning, /HTTP 503/);
+  assert.equal(calls.vision.length, 2, "a failed request is not asked again");
+  assert.equal(calls.deleted, true);
+});
+
+test("a browser step that fails after a page was kept ends the run with the pages kept", async () => {
+  const { fetcher, calls } = fakeServices([article, null], ['{"action":"read"}', '{"action":"click","element":1}']);
+  const { sources, warning } = await visionAgentResearch("How do I grow ferns?", { kernelKey: "k", vision }, signal, fetcher);
+  assert.deepEqual(sources.map((s) => s.url), ["https://example.com/ferns"]);
+  assert.match(warning, /stopped early after an error.*could not carry out that step/);
+  assert.equal(calls.kernel.length, 2);
+  assert.equal(calls.deleted, true);
+});
+
+test("a failure on a readable page keeps that page, and a failure with nothing to keep still fails with its cause", async () => {
+  const onArticle = fakeServices([article], [503]);
+  const found = await visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, onArticle.fetcher);
+  assert.deepEqual(found.sources.map((s) => s.url), ["https://example.com/ferns"]);
+  assert.match(found.warning, /HTTP 503/);
+  const onSearch = fakeServices([page], [429]);
+  await assert.rejects(visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, onSearch.fetcher),
+    (error) => error instanceof ResearchError && /rate limited/.test(error.message) && !error.retryable);
+  const stepFails = fakeServices([page, null], ['{"action":"click","element":1}']);
+  await assert.rejects(visionAgentResearch("Q?", { kernelKey: "k", vision }, signal, stepFails.fetcher),
+    (error) => error instanceof ResearchError && /could not carry out that step/.test(error.message));
+  assert.equal(stepFails.calls.deleted, true);
+});
+
+test("a stop mid-run still stops the agent, whatever it kept", async () => {
+  const controller = new AbortController();
+  const { fetcher: services } = fakeServices([article], ['{"action":"read"}', '{"action":"scroll","direction":"down"}']);
+  let asked = 0;
+  const fetcher = async (url, init) => {
+    if (!url.startsWith("https://api.onkernel.com") && ++asked === 2) {
+      controller.abort(new DOMException("Stopped", "AbortError"));
+      throw controller.signal.reason;
+    }
+    return services(url, init);
+  };
+  await assert.rejects(visionAgentResearch("Q?", { kernelKey: "k", vision }, controller.signal, fetcher), { name: "AbortError" });
 });

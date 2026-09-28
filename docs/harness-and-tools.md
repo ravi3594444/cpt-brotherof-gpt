@@ -25,7 +25,9 @@ Keys are server-side environment variables.
    task's first 12 words, and a query is cut to 16 words. The depth is
    `"quick"` (the default: a few pages are enough) or `"deep"` (only when the
    user asks for thorough, comprehensive or detailed research, or for many
-   sources or sites); anything else means quick. The model calls it when the user
+   sources or sites); `"deep"` in any case counts, anything else means quick.
+   A query that is null or not text, or another depth, never rejects the call:
+   research still runs, with these fallbacks. The model calls it when the user
    asks it to research, search, find, look up, compare or check something, or
    when a good answer needs current or verifiable facts; otherwise it answers
    directly and the stream has no research parts. Scout adds no rules of its
@@ -86,7 +88,8 @@ Keys are server-side environment variables.
    for deep. When JEV gives no usable answer, the step says why: "JEV was
    unavailable (HTTP 402); using Kernel", "(timed out)" after 4.5 seconds,
    "(network error)", or "(unexpected answer)", and `console.warn` logs the
-   status and the first 300 characters of the response, never the key. A
+   status and the first 300 characters of the response, never the key (it is
+   taken out of the whole response before the cut). A
    second research for the same Answer leaves out the engines already tried,
    and Browser Use Cloud is then the backup (without confidence gates). With
    just one browser key, that engine runs.
@@ -203,7 +206,9 @@ never starts a second paid run) and then polled in windows of 240 seconds, one
 workflow step each, until it completes, fails, reaches `RESEARCH_MAX_COST_USD`,
 or passes 60 windows. The Vision agent runs in batches of up to 240 seconds, up
 to 10 steps for quick research and 40 for deep, and its browser is closed in
-every case. Kernel and the Search API
+every case. A turn starts only while 140 seconds of its batch are left (a model
+reply and its shorter ask again, 45 seconds each, then a 50-second browser
+step), so a batch ends inside its window. Kernel and the Search API
 are one step each. The answer is its own step, written by the research writer
 (or the answer model) with the tool defined and `toolChoice: "none"`; after a
 failure that may be retried, the answer model decides first. A retried step first writes `reset-step`, so its chunks do
@@ -283,7 +288,11 @@ pages (6 for deep). An empty or unusable reply is asked once more in the same
 step with a shorter prompt (the last five actions, less page text); a second
 empty reply ends the run with the pages kept and the warning "The vision model
 stopped replying; these are the pages it had read", and fails only when it kept
-none. The route's ceiling is 280 seconds and
+none. A vision model error (such as HTTP 503 or 429, or a reply that times out)
+or a browser step Kernel could not carry out ends the run the same way once it
+has kept a page, or is on a readable one: the warning says "The vision agent
+stopped early after an error" and why. With nothing to keep, or when the run is
+stopped or out of research time, the run fails with the error. The route's ceiling is 280 seconds and
 `maxDuration` is 300, Vercel's default limit.
 
 Photos: a question can carry up to four photos. The browser shrinks each to
