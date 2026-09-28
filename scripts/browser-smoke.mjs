@@ -92,6 +92,56 @@ function heldAnswers() {
     }));
   };
 }
+// Runs in the page: watches the last Answer on screen and records anything that shows it restarting
+// or jumping back: words that got fewer, and research steps or source cards replaced by fewer, both
+// in every change to the page (`dom`) and in the frames the reader sees (`painted`); and the
+// Reconnecting note. Starts at once, or when the page has loaded.
+function watchAnswer() {
+  const start = () => {
+    const tracker = () => {
+      const out = { shrank: [], steps: [], sources: [] };
+      let last = { text: 0, steps: 0, sources: 0 };
+      return {
+        out,
+        see({ text, steps, sources }) {
+          if (text < last.text) out.shrank.push(`${last.text} to ${text}`);
+          if (steps && steps < last.steps) out.steps.push(`${last.steps} to ${steps}`);
+          if (sources < last.sources) out.sources.push(`${last.sources} to ${sources}`);
+          last = { text, steps: steps || last.steps, sources };
+        },
+      };
+    };
+    const dom = tracker();
+    const painted = tracker();
+    const seen = (window.__watch = { dom: dom.out, painted: painted.out, reconnecting: 0, longest: 0 });
+    const measure = () => {
+      const answer = [...document.querySelectorAll(".assistant-message")].at(-1);
+      if (!answer) return;
+      return {
+        text: answer.querySelector(".answer-body")?.textContent.length ?? 0,
+        steps: answer.querySelectorAll(".agent-steps li").length,
+        sources: answer.querySelectorAll(".source-card").length,
+      };
+    };
+    const sample = () => {
+      if ([...document.querySelectorAll(".progress-strip")].some((s) => /Reconnecting/.test(s.textContent))) seen.reconnecting++;
+      const now = measure();
+      if (!now) return;
+      dom.see(now);
+      seen.longest = Math.max(seen.longest, now.text);
+    };
+    const frame = () => {
+      const now = measure();
+      if (now) painted.see(now);
+      requestAnimationFrame(frame);
+    };
+    new MutationObserver(sample).observe(document.body, { subtree: true, childList: true, characterData: true });
+    sample();
+    requestAnimationFrame(frame);
+  };
+  if (document.body) start();
+  else document.addEventListener("DOMContentLoaded", start);
+}
 const LIVE_CONFIG = {
   access: "open", demo: false, modelConnected: true, searchConnected: true, modelName: "Test model",
   engines: { browserUse: false, kernel: true, visionAgent: false, tavily: false, jev: false, vision: false },
@@ -1445,6 +1495,32 @@ try {
       () => [...document.querySelectorAll(".assistant-message")].some((m) => /The test research found 2 sources/.test(m.innerText)),
       null, { timeout: ms },
     ).then(() => true, () => false);
+    // The job's Answer has started to stream its words (the test answer takes about eight seconds).
+    const streamingAnswer = (page) => page.waitForFunction(
+      () => /The test research found/.test([...document.querySelectorAll(".assistant-message .answer-body")].at(-1)?.textContent || ""),
+      null, { timeout: 60000 },
+    ).then(() => true, () => false);
+    // The Answer is finished: its job is over, so Stop is gone.
+    const over = (page) => page.waitForFunction(
+      () => document.querySelector(".answer-actions") &&
+        ![...document.querySelectorAll("button")].some((b) => /Stop/.test(b.getAttribute("aria-label") || "")),
+      null, { timeout: 60000 },
+    ).then(() => true, () => false);
+    const stillStreaming = (page) => page.getByRole("button", { name: /Stop/ }).count().then((n) => n > 0);
+    const onlyOnce = (texts) => texts.length === 1 && (texts[0].match(/The test research found 2 sources/g) || []).length === 1;
+    // Switching away from the app and back, as a desktop tab or Android does.
+    const setShown = (page, state) => page.evaluate((state) => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+      document.dispatchEvent(new Event("visibilitychange"));
+      if (state === "visible") document.dispatchEvent(new Event("resume"));
+    }, state);
+    // Reads of a job from the start of its stream: a full replay.
+    const replays = (page) => {
+      const seen = [];
+      page.on("request", (r) => /\/api\/jobs\/[^/]+\/stream\?startIndex=0$/.test(r.url()) && seen.push(r.url()));
+      return seen;
+    };
+    const watched = (page) => page.evaluate(() => window.__watch);
     {
       // Research that starts after the old in-request budget, then the app is closed and opened again.
       const { context, page, errors } = await openLive(PHONE);
@@ -1504,6 +1580,125 @@ try {
         JSON.stringify(texts).slice(0, 300));
       check("  no error banner is left", (await page.locator(".error-banner").count()) === 0,
         await page.locator(".error-banner").allInnerTexts().then((t) => t.join(" | ")));
+      check("  no page errors", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+    {
+      // Switching away and back while the job researches and while its Answer streams: nothing restarts.
+      const { context, page, errors } = await openLive(PHONE);
+      const replayed = replays(page);
+      await ask(page, "Please research ferns while I switch apps");
+      await page.waitForSelector(".agent-steps li", { timeout: 15000 }).catch(() => {});
+      await page.evaluate(watchAnswer);
+      await setShown(page, "hidden");
+      await page.waitForTimeout(2500);
+      await setShown(page, "visible");
+      const streamed = await streamingAnswer(page);
+      await page.waitForTimeout(500);
+      await setShown(page, "hidden");
+      await page.waitForTimeout(1000);
+      await setShown(page, "visible");
+      await page.waitForTimeout(300);
+      await setShown(page, "hidden");
+      await setShown(page, "visible");
+      const finishedHere = await over(page);
+      const seen = await watched(page);
+      check("research job: switching away and back never restarts the answer: its words never get fewer",
+        streamed && finishedHere && seen.longest > 400 && seen.dom.shrank.length === 0, JSON.stringify(seen));
+      check("  its research steps and source cards are never replaced by older ones",
+        seen.dom.steps.length === 0 && seen.dom.sources.length === 0, JSON.stringify(seen));
+      check("  no Reconnecting note while it streams, and no replay from the start",
+        seen.reconnecting === 0 && replayed.length === 0, JSON.stringify({ reconnecting: seen.reconnecting, replayed }));
+      check("  it completes once", onlyOnce(await answerText(page)));
+      check("  no page errors", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+    {
+      // The connection drops for a few seconds while the Answer streams: it carries on from where it was.
+      const { context, page, errors } = await openLive(PHONE);
+      const replayed = replays(page);
+      await ask(page, "Please research ferns while the phone loses signal");
+      const streamed = await streamingAnswer(page);
+      await page.evaluate(watchAnswer);
+      await context.setOffline(true);
+      await page.waitForTimeout(6000);
+      const whileOffline = (await watched(page)).longest;
+      await context.setOffline(false);
+      const finishedHere = await over(page);
+      const seen = await watched(page);
+      check("research job: offline mid-answer, the answer carries on from where it was, without a replay",
+        streamed && finishedHere && seen.dom.shrank.length === 0 && replayed.length === 0 && seen.longest > whileOffline,
+        JSON.stringify({ seen, replayed, whileOffline }));
+      check("  it completes once, with no error banner",
+        onlyOnce(await answerText(page)) && (await page.locator(".error-banner").count()) === 0,
+        JSON.stringify(await answerText(page)).slice(0, 300));
+      check("  no page errors", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+    {
+      // A reader who scrolled up stays where they are while the Answer streams, also after switching away and back.
+      const { context, page, errors } = await openLive({ width: 412, height: 640 });
+      await ask(page, "Please research ferns for a long read");
+      const streamed = await streamingAnswer(page);
+      const log = page.locator(".conversation-inner").locator("xpath=..");
+      const canScroll = await page.waitForFunction(() => {
+        const el = document.querySelector(".conversation-inner")?.parentElement;
+        return el && el.scrollHeight > el.clientHeight + 400;
+      }, null, { timeout: 15000 }).then(() => true, () => false);
+      await page.mouse.move(206, 320);
+      await page.mouse.wheel(0, -300);
+      await page.waitForTimeout(500);
+      const scrollTop = () => log.evaluate((el) => el.scrollTop);
+      const before = await scrollTop();
+      await setShown(page, "hidden");
+      await page.waitForTimeout(500);
+      await setShown(page, "visible");
+      await page.waitForTimeout(1500);
+      const after = await scrollTop();
+      const streamingStill = await stillStreaming(page);
+      const growing = await log.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+      check("research job: scrolled up while the answer streams, the reader stays put when the app comes back",
+        streamed && canScroll && streamingStill && Math.abs(after - before) <= 4 && growing > 100,
+        JSON.stringify({ before, after, streamingStill, growing }));
+      await over(page);
+      check("  no page errors", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+    {
+      // A reload mid-answer (a cold start) still reads the job again from its start, and ends once.
+      const { context, page, errors } = await openLive({ width: 1280, height: 520 });
+      await context.addInitScript(watchAnswer);
+      await ask(page, "Please research ferns and then reload");
+      await streamingAnswer(page);
+      await page.waitForTimeout(2500);
+      const replayed = replays(page);
+      // The replay answers a little late, so the reader can scroll up before it lands.
+      await context.route(/\/stream\?startIndex=0$/, async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        await route.continue().catch(() => {});
+      });
+      await page.reload({ waitUntil: "networkidle" });
+      await page.waitForSelector(".logo-reveal", { state: "detached", timeout: 5000 }).catch(() => {});
+      await conversationItem(page, "Please research ferns and then reload").click();
+      await page.waitForSelector(".assistant-message .answer-body", { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(900);
+      await page.mouse.move(760, 220);
+      await page.mouse.wheel(0, -160);
+      await page.waitForTimeout(400);
+      const log = page.locator(".conversation-inner").locator("xpath=..");
+      const scrollTop = () => log.evaluate((el) => el.scrollTop);
+      const before = await scrollTop();
+      await page.waitForTimeout(3500);
+      const after = await scrollTop();
+      const finishedHere = await over(page);
+      const seen = await watched(page);
+      check("research job: a reload mid-answer reads the job again and completes exactly once",
+        finishedHere && replayed.length >= 1 && onlyOnce(await answerText(page)),
+        JSON.stringify({ replayed, texts: (await answerText(page)).map((t) => t.slice(0, 80)) }));
+      check("  the replay never shows less than the saved answer on screen",
+        seen.painted.shrank.length === 0 && seen.painted.steps.length === 0 && seen.painted.sources.length === 0, JSON.stringify(seen));
+      check("  a reader who scrolled up stays where they are when the replay lands",
+        before > 0 && Math.abs(after - before) <= 4, JSON.stringify({ before, after }));
       check("  no page errors", errors.length === 0, errors.join(" | "));
       await context.close();
     }

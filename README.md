@@ -61,8 +61,10 @@ own. A job has no time limit. Browser Use can browse for as long as the task
 needs (up to its own 4-hour session), and the Vision agent can take up to 60
 steps. Only `RESEARCH_MAX_COST_USD`, Stop, and a guard against runs that never
 end (60 Browser Use windows, about 4 hours) stop it early. The job keeps going
-when the app is closed, the phone locks or the connection drops; the app reads
-the answer again when it comes back, and it survives a reload. Vercel keeps a
+when the app is closed, the phone locks or the connection drops. When the
+connection comes back, the app reads on from where it was, so the answer on
+screen never restarts or jumps; after a reload it reads the answer again.
+Vercel keeps a
 finished job for one day on Hobby, so an answer left unopened longer than that
 is gone and Scout says so. A typical job uses about 20 to 40 of Hobby's 50,000
 workflow events a month. Research jobs need Vercel (or `next dev` and

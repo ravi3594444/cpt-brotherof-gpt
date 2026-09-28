@@ -125,6 +125,11 @@ test("the request skips what the job re-sends, unless the job's first step was r
   assert.deepEqual(fromStart.map((c) => (c.type === "data-job" ? c.data.index : c.type)), [7, "x"]);
 });
 
+test("a window's place can say how far the job's stream had reached, so a replay knows when it has caught up", () => {
+  assert.deepEqual(jobPlace("wrun_1", 0, 41), { type: "data-job", data: { id: "wrun_1", index: 0, tail: 41 }, transient: true });
+  assert.deepEqual(jobPlace("wrun_1", 5), { type: "data-job", data: { id: "wrun_1", index: 5 }, transient: true });
+});
+
 // A fake clock whose naps pass instantly.
 function fakeTime() {
   let now = 0;
